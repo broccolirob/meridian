@@ -1,8 +1,6 @@
-import pickle
-
 import pytest
 
-from src.graph.topo import topo_order
+from src.graph.topo import topo_levels, topo_order
 
 
 def test_tier1_uniswap_v2_erc20_precedes_pair(tier1_graph_id):
@@ -89,6 +87,76 @@ def _fake_node(name: str) -> dict:
         "branches": [],
         "docstring": None,
     }
+
+
+def test_topo_levels_flattens_to_topo_order(tier1_graph_id):
+    """topo_order is just topo_levels flattened. Locks the
+    relationship so neither drifts."""
+    gid, cache_root = tier1_graph_id
+    flat = topo_order(gid, cache_root=cache_root)
+    grouped = [
+        nid
+        for level in topo_levels(gid, cache_root=cache_root)
+        for nid in level
+    ]
+    assert flat == grouped
+
+
+def test_topo_levels_separates_base_from_derived(tier1_graph_id):
+    """UniswapV2ERC20 and UniswapV2Pair must be in DIFFERENT levels
+    (Pair inherits ERC20). This is the dispatch-gating invariant:
+    every dep is on a lower level than its dependents."""
+    gid, cache_root = tier1_graph_id
+    levels = topo_levels(gid, cache_root=cache_root)
+
+    def _level_of(target: str) -> int:
+        for i, level in enumerate(levels):
+            if target in level:
+                return i
+        raise AssertionError(f"{target} not in any level")
+
+    erc20 = _level_of("contracts.UniswapV2ERC20:UniswapV2ERC20")
+    pair = _level_of("contracts.UniswapV2Pair:UniswapV2Pair")
+    assert erc20 < pair, (
+        f"UniswapV2Pair (level {pair}) should be on a strictly "
+        f"later level than UniswapV2ERC20 (level {erc20})"
+    )
+
+
+def test_topo_levels_contains_every_node(tier1_graph_id):
+    """No nodes lost between topo_order and topo_levels."""
+    gid, cache_root = tier1_graph_id
+    flat = topo_order(gid, cache_root=cache_root)
+    levels = topo_levels(gid, cache_root=cache_root)
+    all_in_levels = {nid for level in levels for nid in level}
+    assert all_in_levels == set(flat)
+
+
+def test_topo_levels_contains_edge_puts_contracts_before_modules(
+    tier1_graph_id,
+):
+    """The chunk-2.6-review fix added `contains` to HARD_EDGE_KINDS.
+    Module notes wikilink to contained contracts, so the contract
+    must be documented (and on disk) before the module note runs."""
+    gid, cache_root = tier1_graph_id
+    levels = topo_levels(gid, cache_root=cache_root)
+
+    def _level_of(target: str) -> int:
+        for i, level in enumerate(levels):
+            if target in level:
+                return i
+        raise AssertionError(f"{target} not in any level")
+
+    # contracts.UniswapV2ERC20 (module) contains
+    # contracts.UniswapV2ERC20:UniswapV2ERC20 (contract).
+    contract_level = _level_of(
+        "contracts.UniswapV2ERC20:UniswapV2ERC20"
+    )
+    module_level = _level_of("contracts.UniswapV2ERC20")
+    assert contract_level < module_level, (
+        f"contract level {contract_level} must precede module "
+        f"level {module_level}"
+    )
 
 
 def test_cycle_detection(tmp_path, monkeypatch):

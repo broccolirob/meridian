@@ -5,7 +5,6 @@ module) in dependency order — bases before derived — so the dispatch
 loop in chunk 2.3 can document parents before children.
 """
 
-import heapq
 import json
 import logging
 from pathlib import Path
@@ -23,37 +22,23 @@ DOCUMENTABLE_KINDS: frozenset[str] = frozenset(
 # Hard ordering edges — derived must come AFTER base.
 # `uses` and `imports` are listed in CHUNKS.md but Trailmark's
 # Solidity parser doesn't emit them today. We keep them in the
-# accept-list so non-Solidity codebases will use them when available.
-# `contains` is intentionally NOT here: module-contains-contract is
-# structural, not a documentation dependency.
+# accept-list so non-Solidity codebases use them when available.
+# `contains` IS in here: module notes wikilink to the contracts they
+# contain ([[contracts/UniswapV2Pair|...]]), so contracts must be
+# documented before their containing module note for those links to
+# resolve at write time. Contract→method `contains` edges are
+# automatically dropped because methods aren't in DOCUMENTABLE_KINDS.
 HARD_EDGE_KINDS: frozenset[str] = frozenset(
-    {"inherits", "implements", "uses", "imports"}
+    {"inherits", "implements", "uses", "imports", "contains"}
 )
 
 
-def topo_order(
+def _build_dep_graph(
     graph_id: str,
-    *,
-    cache_root: Path = CACHE_ROOT,
-) -> list[str]:
-    """Return documentable node IDs in dependency order.
-
-    Bases come first, derived contracts last. `calls` is soft (not
-    used for ordering). `contains` is structural (not used). Methods
-    are NOT in the output — they're documented inside their parent.
-
-    Phantom inheritance targets (Trailmark's `inferred`-confidence
-    cross-file references like `<file>:<BareName>` that don't match
-    any real node) get resolved by bare-name lookup against the
-    documentable set. Ambiguous matches (two contracts with the same
-    simple name) drop the edge with no constraint between them.
-
-    Deterministic: at each step the lexicographically smallest
-    available node is emitted next.
-
-    Raises `ValueError` if a cycle is detected among the resolved
-    hard edges.
-    """
+    cache_root: Path,
+) -> tuple[dict[str, dict], dict[str, set[str]], dict[str, set[str]]]:
+    """Internal: load the parsed graph and build the documentable
+    dep graph. Returns (nodes, deps, dependents)."""
     engine = load_graph(graph_id, cache_root=cache_root)
     data = json.loads(engine.to_json())
 
@@ -85,26 +70,74 @@ def topo_order(
         for d in ds:
             dependents[d].add(src)
 
+    return nodes, deps, dependents
+
+
+def topo_levels(
+    graph_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[list[str]]:
+    """Return documentable node IDs grouped into dependency levels.
+
+    Level N contains nodes whose dependencies are all in levels
+    0..N-1. Nodes within a single level have no dependencies among
+    themselves — the dispatch loop can process them in parallel
+    while waiting for the level to finish before starting the next.
+
+    Within each level, IDs are sorted lexicographically for
+    deterministic output.
+
+    Raises `ValueError` on cycle.
+    """
+    nodes, deps, dependents = _build_dep_graph(graph_id, cache_root)
     in_degree = {nid: len(deps[nid]) for nid in nodes}
-    heap = [nid for nid, deg in in_degree.items() if deg == 0]
-    heapq.heapify(heap)
 
-    order: list[str] = []
-    while heap:
-        nid = heapq.heappop(heap)
-        order.append(nid)
-        for dep in sorted(dependents[nid]):
-            in_degree[dep] -= 1
-            if in_degree[dep] == 0:
-                heapq.heappush(heap, dep)
+    levels: list[list[str]] = []
+    remaining = set(in_degree)
+    while remaining:
+        current = sorted(nid for nid in remaining if in_degree[nid] == 0)
+        if not current:
+            raise ValueError(
+                f"cycle in documentable-node dependency graph; "
+                f"unresolved: {sorted(remaining)}"
+            )
+        levels.append(current)
+        for nid in current:
+            remaining.discard(nid)
+            for dep in dependents[nid]:
+                if dep in remaining:
+                    in_degree[dep] -= 1
+    return levels
 
-    if len(order) != len(nodes):
-        cycle_nodes = sorted(set(nodes) - set(order))
-        raise ValueError(
-            f"cycle in documentable-node dependency graph; "
-            f"unresolved: {cycle_nodes}"
-        )
-    return order
+
+def topo_order(
+    graph_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[str]:
+    """Return documentable node IDs in dependency order — bases
+    first, derived contracts last.
+
+    Computed by flattening `topo_levels`: within a level, nodes are
+    sorted lexicographically; across levels, level 0 comes first.
+
+    `calls` is a soft edge (not used for ordering). Methods are NOT
+    in the output — they're documented inside their parent's note.
+
+    Phantom inheritance targets (Trailmark's `inferred`-confidence
+    cross-file references like `<file>:<BareName>` that don't match
+    any real node) get resolved by bare-name lookup against the
+    documentable set. Ambiguous matches log a warning and drop the
+    edge (no dependency constraint between those nodes).
+
+    Raises `ValueError` if a cycle is detected.
+    """
+    return [
+        nid
+        for level in topo_levels(graph_id, cache_root=cache_root)
+        for nid in level
+    ]
 
 
 def _resolve_target(

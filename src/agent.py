@@ -22,7 +22,7 @@ from typing import Any, Callable
 from deepagents import create_deep_agent
 from langchain_openai import ChatOpenAI
 
-from src.graph.topo import topo_order
+from src.graph.topo import topo_levels, topo_order
 from src.subagents import NODE_DOCUMENTER_SUBAGENT
 from src.tools import graph_summary
 
@@ -157,6 +157,17 @@ def dispatch_topo(
     Per-node exceptions are caught and recorded in `failures`; the
     loop never aborts mid-walk.
 
+    Cache root: ALWAYS the default `.washable/graph/`. We don't
+    expose an override because subagent tools (get_node, callers_of,
+    annotate, etc.) bind their `cache_root` default at module-import
+    time on the LLM agent's tool list — there's no clean way to
+    thread a per-call override through that surface without
+    signature-stripping closures. trailmark_parse + dispatch_topo +
+    every subagent tool all read/write the default, so consistency
+    holds for real runs. Tools-layer tests that need isolation
+    should call the tool functions directly with explicit
+    `cache_root=` instead of going through dispatch_topo.
+
     Returns:
         {
             "graph_id":    str,
@@ -178,10 +189,12 @@ def dispatch_topo(
     # Empirically verified at cap=5 on Tier 0 (8 nodes) and Tier 1
     # (22 nodes) without state corruption.
     agent = build_agent(graph_id, vault_path, model=model)
-    order = topo_order(graph_id)
+    levels = topo_levels(graph_id)
+    order = [nid for level in levels for nid in level]
 
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    progress_idx = 0
 
     def _try_one(node_id: str) -> tuple[str, Any]:
         try:
@@ -190,17 +203,25 @@ def dispatch_topo(
             _log.exception("dispatch failed for %s", node_id)
             return ("fail", f"{type(e).__name__}: {e}")
 
-    with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
-        futures = {pool.submit(_try_one, nid): nid for nid in order}
-        for i, future in enumerate(as_completed(futures), 1):
-            node_id = futures[future]
-            status, info = future.result()
-            if on_progress is not None:
-                on_progress(i, len(order), node_id)
-            if status == "ok":
-                successes.append(info)
-            else:
-                failures.append({"node_id": node_id, "error": info})
+    # Dispatch one level at a time. Within a level, all nodes are
+    # independent (verified by topo_levels); they run in parallel up
+    # to concurrency_cap. Across levels, we wait for the level to
+    # finish before starting the next — that's what guarantees a
+    # derived contract's wikilink targets exist on disk by the time
+    # the derived contract's NodeDocumenter runs.
+    for level in levels:
+        with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
+            futures = {pool.submit(_try_one, nid): nid for nid in level}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                status, info = future.result()
+                progress_idx += 1
+                if on_progress is not None:
+                    on_progress(progress_idx, len(order), node_id)
+                if status == "ok":
+                    successes.append(info)
+                else:
+                    failures.append({"node_id": node_id, "error": info})
 
     return {
         "graph_id": graph_id,

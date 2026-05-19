@@ -29,9 +29,9 @@ class _FakeAgent:
         return {"messages": [reply]}
 
 
-def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id):
+def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id_default_cache):
     """All documentable Tier 0 nodes get exactly one agent invocation."""
-    gid, _ = tier0_graph_id
+    gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
@@ -43,8 +43,10 @@ def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id):
     assert len(fake.calls) == 8
 
 
-def test_dispatch_includes_node_id_in_task(monkeypatch, tier0_graph_id):
-    gid, _ = tier0_graph_id
+def test_dispatch_includes_node_id_in_task(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
@@ -54,9 +56,11 @@ def test_dispatch_includes_node_id_in_task(monkeypatch, tier0_graph_id):
     assert any("src.tokens.ERC4626:ERC4626" in c for c in fake.calls)
 
 
-def test_dispatch_continues_past_failures(monkeypatch, tier0_graph_id):
+def test_dispatch_continues_past_failures(
+    monkeypatch, tier0_graph_id_default_cache
+):
     """One node failing must not block the rest."""
-    gid, _ = tier0_graph_id
+    gid = tier0_graph_id_default_cache
     fake = _FakeAgent(fail_for={"src.tokens.ERC20:ERC20"})
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
@@ -73,22 +77,30 @@ def test_dispatch_respects_concurrency_cap_default():
     assert DEFAULT_CONCURRENCY_CAP == 5
 
 
-def test_dispatch_rejects_zero_or_negative_cap(monkeypatch, tier0_graph_id):
-    gid, _ = tier0_graph_id
+def test_dispatch_rejects_zero_or_negative_cap(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    gid = tier0_graph_id_default_cache
     monkeypatch.setattr(
         "src.agent.build_agent", lambda *a, **k: _FakeAgent()
     )
     for bad in (0, -1):
         with pytest.raises(ValueError, match="concurrency_cap must be"):
-            dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=bad)
+            dispatch_topo(
+                gid,
+                "/tmp/fake-vault",
+                concurrency_cap=bad,
+            )
 
 
-def test_dispatch_order_field_matches_topo_order(monkeypatch, tier0_graph_id):
+def test_dispatch_order_field_matches_topo_order(
+    monkeypatch, tier0_graph_id_default_cache
+):
     """The returned `order` field IS the topo order, for replay/debug."""
     from src.graph.topo import topo_order
 
-    gid, cache_root = tier0_graph_id
-    expected = topo_order(gid, cache_root=cache_root)
+    gid = tier0_graph_id_default_cache
+    expected = topo_order(gid)  # default cache_root
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 

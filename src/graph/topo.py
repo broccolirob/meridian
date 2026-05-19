@@ -7,9 +7,12 @@ loop in chunk 2.3 can document parents before children.
 
 import heapq
 import json
+import logging
 from pathlib import Path
 
 from src.graph.persist import CACHE_ROOT, load_graph
+
+_log = logging.getLogger(__name__)
 
 # Documentable kinds — methods are documented inside their parent's
 # note (chunk 1.3 design) and don't need their own topo position.
@@ -116,6 +119,11 @@ def _resolve_target(
     2. Otherwise extract the bare name (last segment after the final
        `:`) and try to match a unique documentable node by name.
     3. If zero matches or ambiguous (>1 match), return None.
+
+    Ambiguous matches log a warning — a real codebase with name
+    collisions (e.g., a vendored `ERC20` alongside a custom one)
+    will silently drop dependency edges otherwise, producing wrong
+    ordering with no signal.
     """
     if tgt in nodes:
         return tgt
@@ -123,4 +131,14 @@ def _resolve_target(
     candidates = by_name.get(bare, set())
     if len(candidates) == 1:
         return next(iter(candidates))
+    if len(candidates) > 1:
+        _log.warning(
+            "dropping topo edge: target %r matches %d nodes by bare "
+            "name %r (%s) — ambiguous, can't pick one. Result: no "
+            "dependency constraint between these nodes.",
+            tgt,
+            len(candidates),
+            bare,
+            sorted(candidates),
+        )
     return None

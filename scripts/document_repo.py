@@ -94,7 +94,39 @@ def main() -> int:
     moc_paths = write_root_moc(str(vault), graph_id)
     print(f"      wrote {len(moc_paths)} MOC files")
 
+    # Advisory wikilink check (chunk 2.6). Never fails the run —
+    # broken links are a quality signal, not a dispatch failure.
+    # Users can `scripts/validate_vault.py --fix <vault>` to strip.
+    print("---")
+    print("Validating wikilinks (advisory)...")
+    _broken = _find_broken_wikilinks(vault)
+    if _broken:
+        print(
+            f"  WARNING: {len(_broken)} broken wikilink(s). "
+            f"Run `scripts/validate_vault.py {vault}` to inspect, "
+            f"or add --fix to strip."
+        )
+    else:
+        print("  OK: no broken wikilinks")
+
     return 0 if not result["failures"] else 1
+
+
+def _find_broken_wikilinks(vault: Path) -> list[tuple[Path, str]]:
+    """Inline thin wrapper around validate_vault.find_broken_links.
+    Import is lazy because validate_vault lives in scripts/ alongside
+    this file — adding it to the top-level import block would force
+    every other importer of scripts/document_repo.py to depend on it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "validate_vault",
+        Path(__file__).resolve().parent / "validate_vault.py",
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.find_broken_links(vault)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,17 @@
 """Main agent — the washable orchestrator.
 
 Walks a parsed graph's topological order and dispatches NodeDocumenter
-per node. Chunk 2.2 is the *skeleton*: the prompt describes the plan,
-the tool list is wired up, but dispatch logic doesn't exist yet
-(chunk 2.3 owns that).
+per node.
+
+Two public entry points:
+
+- `build_agent(graph_id, vault_path)` constructs a deepagents agent
+  configured for single-node dispatch (the LLM receives one node per
+  user message and forwards to NodeDocumenter).
+
+- `dispatch_topo(graph_id, vault_path, ...)` is the Python-driven
+  loop: it builds the agent once, walks `topo_order`, and invokes
+  the agent per node through a ThreadPoolExecutor (default cap = 5).
 """
 
 import logging
@@ -91,15 +99,14 @@ def build_agent(
     """Build the washable main agent.
 
     `graph_id` is the 12-hex graph identifier from `trailmark_parse`.
-    `vault_path` should be an absolute path (the harness in chunk 1.4
-    pattern: `Path(vault).resolve()`).
+    `vault_path` should be an absolute path (callers typically use
+    `Path(vault).resolve()` so the LLM sees an unambiguous string).
 
     Returns a langgraph `CompiledStateGraph` ready for `.invoke()`.
-
-    NOTE: chunk 2.2 is the *skeleton*. The system prompt describes
-    the 9-step plan but no dispatch logic is wired here. Calling
-    `.invoke()` on this agent today would produce a planning-only
-    response. Real dispatch lands in chunk 2.3.
+    The agent is configured for single-node dispatch: each invocation
+    receives one node in the user message and forwards to the
+    node-documenter subagent. The Python driver in `dispatch_topo`
+    handles the walk across the topological order.
     """
     llm = ChatOpenAI(model=model)
     return create_deep_agent(
@@ -164,6 +171,12 @@ def dispatch_topo(
             f"concurrency_cap must be >= 1 (got {concurrency_cap})"
         )
 
+    # One agent shared across all worker threads. Safe because
+    # langgraph's CompiledStateGraph keeps no mutable instance state
+    # across `.invoke()` calls — the run state lives in the input
+    # dict, and the underlying ChatOpenAI client is stateless.
+    # Empirically verified at cap=5 on Tier 0 (8 nodes) and Tier 1
+    # (22 nodes) without state corruption.
     agent = build_agent(graph_id, vault_path, model=model)
     order = topo_order(graph_id)
 

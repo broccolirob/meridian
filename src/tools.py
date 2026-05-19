@@ -200,3 +200,28 @@ def clear_annotations(
     result = engine.clear_annotations(node_id, kind=kind_enum)
     save_graph(engine, graph_id, cache_root=cache_root)
     return result
+
+
+def read_file_range(
+    path: str | Path,
+    start_line: int,
+    end_line: int,
+) -> str:
+    """Read lines `[start_line, end_line]` (1-indexed, inclusive)
+    from `path`. Out-of-range bounds clamp to the file's actual
+    length; reversed ranges return an empty string.
+
+    Raises `FileNotFoundError` if the file doesn't exist and
+    `ValueError` if `start_line` or `end_line` is < 1.
+    """
+    if start_line < 1 or end_line < 1:
+        raise ValueError(
+            f"line numbers must be >= 1 "
+            f"(got start={start_line}, end={end_line})"
+        )
+    if end_line < start_line:
+        return ""
+    file_path = Path(path)
+    with open(file_path, encoding="utf-8") as f:
+        lines = f.readlines()
+    return "".join(lines[start_line - 1 : end_line])

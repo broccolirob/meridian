@@ -172,12 +172,15 @@ def trailmark_parse(repo_path: str, language: str = "auto") -> str
 def graph_summary(graph_id: str) -> dict
 def list_nodes(graph_id: str, kind: str | None = None) -> list[dict]
 def get_node(graph_id: str, node_id: str) -> dict
-def callers_of(graph_id: str, node_id: str) -> list[str]
-def callees_of(graph_id: str, node_id: str) -> list[str]
-def ancestors_of(graph_id: str, node_id: str) -> list[str]
-def reachable_from(graph_id: str, node_id: str) -> list[str]
+def callers_of(graph_id: str, node_id: str) -> list[dict]
+def callees_of(graph_id: str, node_id: str) -> list[dict]
+def ancestors_of(graph_id: str, node_id: str) -> list[dict]
+def reachable_from(graph_id: str, node_id: str) -> list[dict]
 def paths_between(graph_id: str, src: str, dst: str) -> list[list[str]]
 def entrypoint_paths_to(graph_id: str, node_id: str) -> list[list[str]]
+# Note: neighbor/reachability queries return full Trailmark node dicts
+# (not just IDs) so subagents don't have to re-call get_node per hop.
+# Path queries stay as list[str] — paths are usually walked, not inspected.
 def attack_surface(graph_id: str) -> list[dict]
 def complexity_hotspots(graph_id: str, threshold: int = 10) -> list[dict]
 

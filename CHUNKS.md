@@ -91,6 +91,12 @@ Conventions used by every chunk:
 - **Success:** Resolver returns identical strings on repeat runs; covers
   all `NodeKind` values from Trailmark.
 - **Deps:** 0.4, 0.6.
+- **Known limitation (deferred):** Wikilink paths use `node["name"]`, so
+  two contracts/libraries with the same simple name in different modules
+  (e.g. two `ERC20`s) collide on the same `.md` path. Tier 0/1 fixtures
+  don't exercise this. Fix when a real fixture or user repo triggers a
+  collision — likely needs a graph-wide uniqueness scan + qualified
+  fallback. Tracked here so it doesn't get lost.
 
 ### 0.8 — End-to-end smoke script
 

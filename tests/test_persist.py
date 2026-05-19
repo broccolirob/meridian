@@ -22,6 +22,27 @@ def test_save_load_round_trip(tier0_engine, tier0_dir, tmp_path):
     assert loaded.summary() == tier0_engine.summary()
 
 
+def test_save_leaves_no_tmp_files(tier0_engine, tier0_dir, tmp_path):
+    """Atomic write uses a tmp file in the same dir; it must be cleaned
+    up (renamed into place) so we don't leak `.engine.pkl.tmp.*` litter
+    in the cache directory."""
+    rh = repo_hash(str(tier0_dir))
+    save_graph(tier0_engine, rh, cache_root=tmp_path)
+    out_dir = tmp_path / rh
+    leftovers = [p.name for p in out_dir.iterdir() if p.name != "engine.pkl"]
+    assert leftovers == [], f"tmp files lingered: {leftovers}"
+
+
+def test_save_is_idempotent_under_repeat(tier0_engine, tier0_dir, tmp_path):
+    """Re-saving over an existing engine.pkl must succeed atomically —
+    os.replace overwrites the destination."""
+    rh = repo_hash(str(tier0_dir))
+    save_graph(tier0_engine, rh, cache_root=tmp_path)
+    save_graph(tier0_engine, rh, cache_root=tmp_path)  # must not raise
+    loaded = load_graph(rh, cache_root=tmp_path)
+    assert loaded.summary() == tier0_engine.summary()
+
+
 def test_load_missing_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_graph("deadbeef0123", cache_root=tmp_path)

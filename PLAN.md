@@ -219,16 +219,30 @@ structural goes through Trailmark.
 ### NodeDocumenter
 
 Input: `graph_id`, `node_id`, plus a manifest of already-documented dependencies.
-Tools: read-only Trailmark queries + `read_file_range` + `write_obsidian_note` +
-`annotate` + `resolve_wikilink`.
+Tools: read-only Trailmark queries (`get_node`, `list_nodes`, `callers_of`,
+`callees_of`) + `read_node_source` + `resolve_wikilink` + `annotate` +
+`render_and_write_node_note`.
 Output: one Obsidian note. Side effect: may add `assumption`/`invariant`
 annotations to the graph.
+
+Security note: `read_node_source(graph_id, node_id)` derives the file path
+from trusted Trailmark metadata, so adversarial Solidity comments in target
+repos cannot prompt-inject the agent into reading sensitive local files.
+The lower-level `read_file_range(path, ...)` exists but is intentionally
+NOT on any subagent's tool list.
+
+Template note: `render_and_write_node_note(vault, node, ctx, body)` is a
+combined render+write tool that produces the canonical 7-section template
+atomically. The separable `render_node_note` / `write_obsidian_note` exist
+but are NOT on the subagent's tool list — the combined tool removes the
+"agent skips the template and invents its own structure" failure mode.
 
 ### FlowTracer
 
 Input: `graph_id`, an entrypoint `node_id` from `attack_surface()`.
 Tools: `entrypoint_paths_to`, `paths_between`, `get_node`, `render_mermaid_sequence`,
-`write_obsidian_note`.
+plus a future `render_and_write_flow_note` (a combined render+write tool that
+matches the NodeDocumenter pattern — keeps the template hard to bypass).
 Output: one `flows/<entrypoint>.md` note narrating the path, embedding the
 sequence diagram, linking each hop to its NodeDocumenter note.
 
@@ -236,7 +250,8 @@ sequence diagram, linking each hop to its NodeDocumenter note.
 
 Input: `graph_id` after preanalysis + SARIF augmentation.
 Tools: `run_preanalysis`, `nodes_with_annotation`, `complexity_hotspots`,
-`write_obsidian_note`, `annotate`.
+`annotate`, plus a future `render_and_write_risk_note` (same combined-tool
+pattern as NodeDocumenter and FlowTracer).
 Output: notes under `risks/` plus back-annotations on the graph
 (`AnnotationKind.FINDING`) so individual node notes can embed their findings on
 next render.

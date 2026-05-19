@@ -1,4 +1,5 @@
 import hashlib
+import os
 import pickle
 import re
 from pathlib import Path
@@ -34,10 +35,26 @@ def save_graph(
     _validate_graph_id(graph_id)
     out_dir = Path(cache_root) / graph_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "engine.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(engine, f)
-    return path
+    final_path = out_dir / "engine.pkl"
+    # Atomic write: pickle.dump into a same-directory tmp file, then
+    # os.replace into place. Eliminates the partial-read race where a
+    # reader (e.g. another tool call) opens engine.pkl while a writer
+    # is mid-pickle.dump and hits EOFError. PID in the tmp name keeps
+    # concurrent writers from clobbering each other's tmp.
+    # (Lost-update — two writers racing on the same graph — is still
+    # parked for chunk 2.3 where multi-agent dispatch lands.)
+    tmp_path = out_dir / f".engine.pkl.tmp.{os.getpid()}"
+    try:
+        with open(tmp_path, "wb") as f:
+            pickle.dump(engine, f)
+        os.replace(tmp_path, final_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return final_path
 
 
 def load_graph(

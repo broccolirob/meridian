@@ -10,3 +10,6 @@ wheels/
 .venv
 
 .env
+
+# washable runtime cache (graphs, file hashes, etc.)
+.washable/

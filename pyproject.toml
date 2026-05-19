@@ -1,12 +1,13 @@
 [project]
 name = "washable"
 version = "0.1.0"
-description = "Add your description here"
+description = "Code atlas — turns any codebase into an audit-ready Obsidian vault using Trailmark and deepagents."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "deepagents>=0.6.2",
     "langchain-openai>=1.2.1",
+    "trailmark>=0.3.1",
 ]
 
 [dependency-groups]

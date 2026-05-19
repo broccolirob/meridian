@@ -25,8 +25,11 @@ Conventions used by every chunk:
   `langchain-anthropic` (or confirm `langchain-openai`), and dev tools.
 - **Files:** `pyproject.toml`, `uv.lock`.
 - **Success:** `uv sync` succeeds; `uv run trailmark --version` prints a
-  version ≥ 0.8.1.
+  version ≥ 0.3.1.
 - **Deps:** none.
+- **Note:** `0.8.1` (used in an earlier draft) was the Claude Code plugin
+  bundle version. The `trailmark` Python package on PyPI versions
+  independently and is at `0.3.1`+ as of 2026-05.
 
 ### 0.2 — Test fixtures
 

@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +7,15 @@ from trailmark.models import AnnotationKind
 from trailmark.query.api import QueryEngine
 
 from src.graph.persist import CACHE_ROOT, load_graph, repo_hash, save_graph
+
+# Process-level lock for the load -> mutate -> save sequence in
+# annotation writes. Without this, two threads in dispatch_topo's
+# ThreadPoolExecutor can both load engine v1, both annotate, and the
+# second save_graph overwrites the first's annotation (lost update).
+# Atomic writes in save_graph fixed the partial-read race, but not
+# this one. Cross-process locking (fcntl.flock) is parked — Phase 2
+# runs in one Python process; multi-process is a future concern.
+_ANNOTATE_LOCK = threading.Lock()
 
 # Pre-computed for the error-message valid-kinds list. We expose
 # `str` in our public signature for LLM-friendliness, but convert to
@@ -153,9 +163,12 @@ def annotate(
     Returns True if added, False if the node rejected it (e.g.,
     duplicate). Persists changes via save_graph."""
     kind_enum = _to_annotation_kind(kind)
-    engine = load_graph(graph_id, cache_root=cache_root)
-    result = engine.annotate(node_id, kind_enum, description, source=source)
-    save_graph(engine, graph_id, cache_root=cache_root)
+    with _ANNOTATE_LOCK:
+        engine = load_graph(graph_id, cache_root=cache_root)
+        result = engine.annotate(
+            node_id, kind_enum, description, source=source
+        )
+        save_graph(engine, graph_id, cache_root=cache_root)
     return result
 
 
@@ -196,9 +209,10 @@ def clear_annotations(
     """Remove annotations from `node_id`. With `kind`, only that kind;
     without, all annotations on the node. Persists via save_graph."""
     kind_enum = _to_annotation_kind(kind) if kind is not None else None
-    engine = load_graph(graph_id, cache_root=cache_root)
-    result = engine.clear_annotations(node_id, kind=kind_enum)
-    save_graph(engine, graph_id, cache_root=cache_root)
+    with _ANNOTATE_LOCK:
+        engine = load_graph(graph_id, cache_root=cache_root)
+        result = engine.clear_annotations(node_id, kind=kind_enum)
+        save_graph(engine, graph_id, cache_root=cache_root)
     return result
 
 

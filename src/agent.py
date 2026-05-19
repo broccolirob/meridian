@@ -6,8 +6,10 @@ the tool list is wired up, but dispatch logic doesn't exist yet
 (chunk 2.3 owns that).
 """
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from deepagents import create_deep_agent
 from langchain_openai import ChatOpenAI
@@ -16,7 +18,10 @@ from src.graph.topo import topo_order
 from src.subagents import NODE_DOCUMENTER_SUBAGENT
 from src.tools import graph_summary
 
+_log = logging.getLogger(__name__)
+
 DEFAULT_MODEL = "gpt-5-mini"
+DEFAULT_CONCURRENCY_CAP = 5
 
 
 def _build_system_prompt(graph_id: str, vault_path: str | Path) -> str:
@@ -51,15 +56,12 @@ becomes real — until then, treat that step as a no-op):
    order — bases come before derived contracts so wikilinks
    resolve. THIS IS THE ORDER YOU MUST DISPATCH NodeDocumenter IN.
 
-6. For each node in the topological order, dispatch the
-   `node-documenter` subagent via the `task` tool. Pass:
-     - graph_id (the constant above)
-     - node_id (the id from the topo list)
-     - vault_path (the constant above)
-     - overview_hint (optional, leave empty unless the user provided one)
-   Each subagent writes ONE Obsidian note. Cap parallelism to 5.
-   [Phase 2 chunk 2.3 — for now this chunk is a skeleton, dispatch
-   loop will be wired then.]
+6. You'll be invoked once per node by the Python dispatch loop in
+   `dispatch_topo`. Each invocation: receive a node_id in the user
+   message, dispatch the `node-documenter` subagent via the `task`
+   tool (passing graph_id, node_id, vault_path), and return the
+   absolute path the subagent wrote. The Python driver walks the
+   topo list; you do NOT loop. Do not invent extra dispatches.
 
 7. For each entrypoint returned by `attack_surface(graph_id)`,
    dispatch the `flow-tracer` subagent. [Phase 3 — skip for now.]
@@ -109,3 +111,88 @@ def build_agent(
             topo_order,
         ],
     )
+
+
+def _invoke_one(
+    agent: Any, graph_id: str, node_id: str, vault_path: str
+) -> dict[str, Any]:
+    """Single agent invocation for one node. Exceptions bubble up
+    to dispatch_topo, which records them per-node."""
+    task_msg = (
+        f"Document the node `{node_id}` in graph `{graph_id}`. "
+        f"vault_path (absolute) = {vault_path}. "
+        f"Dispatch the `node-documenter` subagent via the `task` "
+        f"tool — do not generate note content yourself."
+    )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": task_msg}]}
+    )
+    last = result["messages"][-1].content
+    return {"node_id": node_id, "agent_reply": last}
+
+
+def dispatch_topo(
+    graph_id: str,
+    vault_path: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    concurrency_cap: int = DEFAULT_CONCURRENCY_CAP,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Walk the topological order for `graph_id` and dispatch
+    NodeDocumenter per node. Returns a summary of what shipped.
+
+    `vault_path` should be an absolute path. `concurrency_cap` caps
+    parallel agent invocations via a ThreadPoolExecutor — the
+    lost-update race in `annotate` is handled by the threading.Lock
+    in `src/tools.py`.
+
+    Per-node exceptions are caught and recorded in `failures`; the
+    loop never aborts mid-walk.
+
+    Returns:
+        {
+            "graph_id":    str,
+            "node_count":  int,
+            "successes":   [{"node_id", "agent_reply"}, ...],
+            "failures":    [{"node_id", "error"}, ...],
+            "order":       [node_id, ...],
+        }
+    """
+    if concurrency_cap < 1:
+        raise ValueError(
+            f"concurrency_cap must be >= 1 (got {concurrency_cap})"
+        )
+
+    agent = build_agent(graph_id, vault_path, model=model)
+    order = topo_order(graph_id)
+
+    successes: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    def _try_one(node_id: str) -> tuple[str, Any]:
+        try:
+            return ("ok", _invoke_one(agent, graph_id, node_id, vault_path))
+        except Exception as e:
+            _log.exception("dispatch failed for %s", node_id)
+            return ("fail", f"{type(e).__name__}: {e}")
+
+    with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
+        futures = {pool.submit(_try_one, nid): nid for nid in order}
+        for i, future in enumerate(as_completed(futures), 1):
+            node_id = futures[future]
+            status, info = future.result()
+            if on_progress is not None:
+                on_progress(i, len(order), node_id)
+            if status == "ok":
+                successes.append(info)
+            else:
+                failures.append({"node_id": node_id, "error": info})
+
+    return {
+        "graph_id": graph_id,
+        "node_count": len(order),
+        "successes": successes,
+        "failures": failures,
+        "order": order,
+    }

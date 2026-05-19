@@ -4,7 +4,7 @@ kind: library
 node_id: src.utils.FixedPointMathLib:FixedPointMathLib
 file: tests/fixtures/tier0_erc4626/src/utils/FixedPointMathLib.sol
 lines: 7-255
-loc: 248
+loc: 249
 cyclomatic_complexity: null
 callers_count: 0
 callees_count: 0

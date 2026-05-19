@@ -22,8 +22,11 @@ def test_subagent_tools_cover_required_capabilities():
     assert "get_node" in tool_names
     assert "callers_of" in tool_names
     assert "callees_of" in tool_names
-    # source reading
-    assert "read_file_range" in tool_names
+    # source reading (scoped — read_file_range is intentionally NOT
+    # on the agent tool list, since it accepts arbitrary paths and
+    # would let adversarial Solidity comments leak local files)
+    assert "read_node_source" in tool_names
+    assert "read_file_range" not in tool_names
     # wikilink resolution
     assert "resolve_wikilink" in tool_names
     # combined render+write (the ONLY way to persist a note)

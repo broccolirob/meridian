@@ -149,8 +149,26 @@ def main() -> int:
     print(last_msg)
     print("---")
 
-    folder = KIND_TO_FOLDER.get(node["kind"], "contracts")
-    expected_path = vault / folder / f"{node['name']}.md"
+    # Methods don't get their own note — the subagent redirects to the
+    # parent contract/library. Mirror that here so checking
+    # `ERC4626:ERC4626.deposit` looks for `contracts/ERC4626.md`,
+    # not `contracts/deposit.md`.
+    expected_node = node
+    if node["kind"] == "method":
+        parent_id = args.node_id.rsplit(".", 1)[0]
+        try:
+            expected_node = get_node(graph_id, parent_id)
+            print(
+                f"      method redirected to parent "
+                f"{expected_node['kind']} {expected_node['name']}"
+            )
+        except KeyError:
+            # Parent missing — fall back to the method's own routing
+            # (will likely 404 below, which is the right signal)
+            pass
+
+    folder = KIND_TO_FOLDER.get(expected_node["kind"], "contracts")
+    expected_path = vault / folder / f"{expected_node['name']}.md"
     if expected_path.exists():
         print(f"NOTE WRITTEN: {expected_path}")
         print(f"  size: {expected_path.stat().st_size} bytes")

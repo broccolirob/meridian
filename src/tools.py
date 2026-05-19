@@ -213,6 +213,13 @@ def read_file_range(
 
     Raises `FileNotFoundError` if the file doesn't exist and
     `ValueError` if `start_line` or `end_line` is < 1.
+
+    Note: This primitive accepts ARBITRARY paths and is therefore
+    **not on any subagent's tool list**. Adversarial Solidity comments
+    in target repos could prompt-inject the agent into reading
+    sensitive local files. Agents go through `read_node_source()`
+    instead, which derives the path from trusted Trailmark node
+    metadata.
     """
     if start_line < 1 or end_line < 1:
         raise ValueError(
@@ -225,3 +232,25 @@ def read_file_range(
     with open(file_path, encoding="utf-8") as f:
         lines = f.readlines()
     return "".join(lines[start_line - 1 : end_line])
+
+
+def read_node_source(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Return the source code for `node_id` — its full parsed line
+    range, read from the file path Trailmark recorded.
+
+    This is the agent-safe wrapper around `read_file_range`: the
+    agent never names a path, so it can't be prompt-injected into
+    reading `/etc/passwd` or similar via adversarial source comments.
+    The path comes from the parsed graph, which is trusted by
+    construction (we ran `trailmark_parse` over a known directory).
+    """
+    node = get_node(graph_id, node_id, cache_root=cache_root)
+    loc = node["location"]
+    return read_file_range(
+        loc["file_path"], loc["start_line"], loc["end_line"]
+    )

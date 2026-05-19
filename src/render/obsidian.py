@@ -251,7 +251,9 @@ def _build_frontmatter(
         "node_id": node["id"],
         "file": loc["file_path"],
         "lines": f"{start}-{end}",
-        "loc": end - start,
+        # Trailmark ranges are inclusive on both ends. Lines 10-183 is
+        # 174 lines (183 - 10 + 1), not 173.
+        "loc": end - start + 1,
         "cyclomatic_complexity": node.get("cyclomatic_complexity"),
         "callers_count": len(graph_ctx.get("callers") or []),
         "callees_count": len(graph_ctx.get("callees") or []),

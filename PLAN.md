@@ -187,7 +187,10 @@ def complexity_hotspots(graph_id: str, threshold: int = 10) -> list[dict]
 # --- Annotations (agent writes findings back to the graph) ---
 def annotate(graph_id: str, node_id: str, kind: str, description: str) -> None
 def annotations_of(graph_id: str, node_id: str) -> list[dict]
-def nodes_with_annotation(graph_id: str, kind: str) -> list[str]
+def nodes_with_annotation(graph_id: str, kind: str) -> list[dict]
+# Note: returns full Trailmark node dicts (not bare IDs), matching
+# the traversal-tool convention. Same rationale: saves Phase 4's
+# RiskSynthesizer from making N follow-up get_node calls.
 
 # --- Pre-analysis + augmentation ---
 def run_preanalysis(graph_id: str) -> dict       # taint, blast radius, attack surface

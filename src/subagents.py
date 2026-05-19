@@ -16,7 +16,7 @@ from src.tools import (
     callers_of,
     get_node,
     list_nodes,
-    read_file_range,
+    read_node_source,
 )
 
 _NODE_DOCUMENTER_PROMPT = """\
@@ -57,8 +57,10 @@ Workflow:
    name, location.file_path, location.start_line,
    location.end_line, docstring.
 
-2. Read the source: `read_file_range(file_path, start_line,
-   end_line)`. Cite line numbers in your overview where relevant.
+2. Read the source: `read_node_source(graph_id, node_id)`. This
+   returns the node's full source range. The path is derived from
+   Trailmark metadata — you don't supply it. Cite line numbers in
+   your overview where relevant.
 
 3. Walk the graph:
    - `callers_of(graph_id, node_id)` -> list of caller node dicts
@@ -144,8 +146,8 @@ NODE_DOCUMENTER_SUBAGENT: SubAgent = {
         list_nodes,
         callers_of,
         callees_of,
-        # Source reading
-        read_file_range,
+        # Source reading (scoped to the parsed graph — no path arg)
+        read_node_source,
         # Wikilink resolution
         resolve_wikilink,
         # Side effects

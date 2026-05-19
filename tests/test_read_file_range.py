@@ -42,3 +42,39 @@ def test_zero_or_negative_lines_raises(start, end):
 def test_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         read_file_range("does/not/exist.sol", 1, 5)
+
+
+# --- read_node_source (scoped, agent-safe wrapper) ------------------
+
+from src.tools import read_node_source  # noqa: E402
+
+
+def test_read_node_source_returns_node_range(tier0_graph_id):
+    """Agent-facing wrapper reads the node's full source — no path
+    argument means no prompt-injection vector for arbitrary file
+    reads."""
+    gid, cache_root = tier0_graph_id
+    text = read_node_source(
+        gid, "src.tokens.ERC4626:ERC4626", cache_root=cache_root
+    )
+    # ERC4626 contract body — includes 'abstract contract ERC4626'
+    assert "abstract contract ERC4626" in text
+    # And not noise from elsewhere in the file
+    assert "abstract contract ERC20" not in text
+
+
+def test_read_node_source_method_returns_method_only(tier0_graph_id):
+    gid, cache_root = tier0_graph_id
+    text = read_node_source(
+        gid, "src.tokens.ERC4626:ERC4626.deposit", cache_root=cache_root
+    )
+    # deposit body mentions safeTransferFrom and previewDeposit
+    assert "deposit" in text
+    # And shouldn't pull in unrelated method bodies like beforeWithdraw
+    assert "beforeWithdraw" not in text
+
+
+def test_read_node_source_unknown_node_raises(tier0_graph_id):
+    gid, cache_root = tier0_graph_id
+    with pytest.raises(KeyError):
+        read_node_source(gid, "does.not:Exist", cache_root=cache_root)

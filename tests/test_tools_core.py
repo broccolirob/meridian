@@ -4,17 +4,7 @@ from src.tools import (
     get_node,
     graph_summary,
     list_nodes,
-    trailmark_parse,
 )
-
-
-@pytest.fixture(scope="module")
-def tier0_graph_id(tier0_dir, tmp_path_factory):
-    cache_root = tmp_path_factory.mktemp("cache")
-    gid = trailmark_parse(
-        str(tier0_dir), language="solidity", cache_root=cache_root
-    )
-    return gid, cache_root
 
 
 def test_trailmark_parse_returns_graph_id(tier0_graph_id):

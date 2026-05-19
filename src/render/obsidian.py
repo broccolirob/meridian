@@ -42,6 +42,12 @@ def write_obsidian_note(
     on demand. Returns the absolute path written."""
     vault = Path(vault_path)
     target = vault / rel_path
+    try:
+        target.resolve().relative_to(vault.resolve())
+    except ValueError as e:
+        raise ValueError(
+            f"rel_path escapes vault: {rel_path!r}"
+        ) from e
     target.parent.mkdir(parents=True, exist_ok=True)
 
     parts: list[str] = []

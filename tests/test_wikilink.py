@@ -1,25 +1,6 @@
 import pytest
 
 from src.render.obsidian import KIND_TO_FOLDER, resolve_wikilink
-from src.tools import trailmark_parse
-
-
-@pytest.fixture(scope="module")
-def tier0_graph_id(tier0_dir, tmp_path_factory):
-    cache_root = tmp_path_factory.mktemp("cache-tier0")
-    gid = trailmark_parse(
-        str(tier0_dir), language="solidity", cache_root=cache_root
-    )
-    return gid, cache_root
-
-
-@pytest.fixture(scope="module")
-def tier1_graph_id(tier1_dir, tmp_path_factory):
-    cache_root = tmp_path_factory.mktemp("cache-tier1")
-    gid = trailmark_parse(
-        str(tier1_dir), language="solidity", cache_root=cache_root
-    )
-    return gid, cache_root
 
 
 def test_contract_wikilink(tier0_graph_id):

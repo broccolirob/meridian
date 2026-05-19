@@ -1,25 +1,13 @@
-import pytest
-
 from src.tools import (
     ancestors_of,
     callees_of,
     callers_of,
     paths_between,
     reachable_from,
-    trailmark_parse,
 )
 
 SWAP = "contracts.UniswapV2Pair:UniswapV2Pair.swap"
 UPDATE = "contracts.UniswapV2Pair:UniswapV2Pair._update"
-
-
-@pytest.fixture(scope="module")
-def tier1_graph_id(tier1_dir, tmp_path_factory):
-    cache_root = tmp_path_factory.mktemp("cache-tier1")
-    gid = trailmark_parse(
-        str(tier1_dir), language="solidity", cache_root=cache_root
-    )
-    return gid, cache_root
 
 
 def test_callers_of_swap_is_empty(tier1_graph_id):

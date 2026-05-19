@@ -67,3 +67,17 @@ def test_write_creates_parent_dirs_lazily(tmp_path):
     )
     assert path.exists()
     assert path.read_text(encoding="utf-8") == "content\n"
+
+
+def test_write_rejects_path_traversal(tmp_path):
+    import pytest
+
+    vault = ensure_vault(tmp_path / "vault")
+    # `..` escape
+    with pytest.raises(ValueError, match="escapes vault"):
+        write_obsidian_note(vault, "../escaped.md", {}, "x")
+    # absolute path escape (Path / absolute drops the left side)
+    with pytest.raises(ValueError, match="escapes vault"):
+        write_obsidian_note(vault, "/tmp/escaped.md", {}, "x")
+    # Nothing got written outside the vault
+    assert not (tmp_path / "escaped.md").exists()

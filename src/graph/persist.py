@@ -14,10 +14,10 @@ def repo_hash(repo_path: str | Path) -> str:
 
 def save_graph(
     engine: QueryEngine,
-    repo_hash: str,
+    graph_id: str,
     cache_root: Path = CACHE_ROOT,
 ) -> Path:
-    out_dir = Path(cache_root) / repo_hash
+    out_dir = Path(cache_root) / graph_id
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "engine.pkl"
     with open(path, "wb") as f:
@@ -26,9 +26,9 @@ def save_graph(
 
 
 def load_graph(
-    repo_hash: str,
+    graph_id: str,
     cache_root: Path = CACHE_ROOT,
 ) -> QueryEngine:
-    path = Path(cache_root) / repo_hash / "engine.pkl"
+    path = Path(cache_root) / graph_id / "engine.pkl"
     with open(path, "rb") as f:
         return pickle.load(f)

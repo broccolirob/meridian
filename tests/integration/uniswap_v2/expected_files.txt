@@ -1,0 +1,44 @@
+# Chunk 2.5 — Tier 1 manifest.
+# Every line is a path relative to the vault root that MUST exist
+# after `bash tests/integration/uniswap_v2/run.sh` completes.
+#
+# When Trailmark's parse output changes or our node-folder routing
+# changes, regenerate by running run.sh once, then `ls -1` the
+# vault and replace this file's contents.
+
+# Root MOC
+README.md
+
+# Contracts (3, with inheritance: UniswapV2ERC20 ← UniswapV2Pair)
+contracts/README.md
+contracts/UniswapV2ERC20.md
+contracts/UniswapV2Factory.md
+contracts/UniswapV2Pair.md
+
+# Libraries (3)
+libraries/README.md
+libraries/Math.md
+libraries/SafeMath.md
+libraries/UQ112x112.md
+
+# Interfaces (5)
+interfaces/README.md
+interfaces/IERC20.md
+interfaces/IUniswapV2Callee.md
+interfaces/IUniswapV2ERC20.md
+interfaces/IUniswapV2Factory.md
+interfaces/IUniswapV2Pair.md
+
+# Module notes (11, one per .sol file)
+_meta/README.md
+_meta/contracts.UniswapV2ERC20.md
+_meta/contracts.UniswapV2Factory.md
+_meta/contracts.UniswapV2Pair.md
+_meta/contracts.interfaces.IERC20.md
+_meta/contracts.interfaces.IUniswapV2Callee.md
+_meta/contracts.interfaces.IUniswapV2ERC20.md
+_meta/contracts.interfaces.IUniswapV2Factory.md
+_meta/contracts.interfaces.IUniswapV2Pair.md
+_meta/contracts.libraries.Math.md
+_meta/contracts.libraries.SafeMath.md
+_meta/contracts.libraries.UQ112x112.md

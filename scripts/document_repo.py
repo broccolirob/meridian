@@ -24,6 +24,7 @@ from src.agent import (  # noqa: E402
     DEFAULT_MODEL,
     dispatch_topo,
 )
+from src.render.moc import write_root_moc  # noqa: E402
 from src.render.obsidian import ensure_vault  # noqa: E402
 from src.tools import trailmark_parse  # noqa: E402
 
@@ -84,6 +85,15 @@ def main() -> int:
     print(f"FAIL : {len(result['failures'])}")
     for f in result["failures"]:
         print(f"  FAIL {f['node_id']}: {f['error']}")
+
+    # Always try to write MOCs — even partial-success vaults benefit
+    # from a navigable landing page. write_root_moc scans the
+    # filesystem, so it only lists notes that actually shipped.
+    print("---")
+    print("Writing MOCs (root + populated folder READMEs)...")
+    moc_paths = write_root_moc(str(vault), graph_id)
+    print(f"      wrote {len(moc_paths)} MOC files")
+
     return 0 if not result["failures"] else 1
 
 

@@ -56,3 +56,58 @@ def get_node(
     engine = load_graph(graph_id, cache_root=cache_root)
     data = json.loads(engine.to_json())
     return data["nodes"][node_id]
+
+
+def callers_of(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Direct callers of `node_id`. Empty list if node is unknown
+    or has no callers in this graph."""
+    return load_graph(graph_id, cache_root=cache_root).callers_of(node_id)
+
+
+def callees_of(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Direct callees of `node_id`."""
+    return load_graph(graph_id, cache_root=cache_root).callees_of(node_id)
+
+
+def ancestors_of(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Every function that can transitively reach `node_id` (upward
+    slice). Useful for 'who could ever invoke this sink'."""
+    return load_graph(graph_id, cache_root=cache_root).ancestors_of(node_id)
+
+
+def reachable_from(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Every function transitively reachable from `node_id`
+    (downward slice). Useful for blast-radius framing."""
+    return load_graph(graph_id, cache_root=cache_root).reachable_from(node_id)
+
+
+def paths_between(
+    graph_id: str,
+    src: str,
+    dst: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[list[str]]:
+    """All simple call paths from `src` to `dst`. Each path is a list
+    of node IDs starting with `src` and ending with `dst`."""
+    return load_graph(graph_id, cache_root=cache_root).paths_between(src, dst)

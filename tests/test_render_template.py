@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 
-from src.render.obsidian import render_node_note
+from src.render.obsidian import render_and_write_node_note, render_node_note
 from src.tools import get_node
 
 
@@ -92,3 +94,81 @@ def test_method_node_renders_too(transfer_method):
     assert fm["cyclomatic_complexity"] == 1
     assert "## Overview" in body
     assert "## Functions" in body
+
+
+# --- render_and_write_node_note (the agent's keystone tool) ---------
+
+
+def test_render_and_write_returns_string_path(erc20_contract, tmp_path):
+    out = render_and_write_node_note(tmp_path, erc20_contract, {}, "ov")
+    assert isinstance(out, str), "agents expect a string path, not Path"
+    assert out.endswith("/contracts/ERC20.md")
+
+
+@pytest.mark.parametrize(
+    "kind,name,expected_subdir",
+    [
+        ("contract", "Pair", "contracts"),
+        ("library", "SafeMath", "libraries"),
+        ("interface", "IERC20", "interfaces"),
+        ("trait", "Iterator", "interfaces"),
+        ("module", "src.tokens.ERC20", "_meta"),
+        ("function", "doStuff", "contracts"),
+        ("struct", "Reserve", "contracts"),
+        ("enum", "Status", "contracts"),
+        ("namespace", "Foo", "contracts"),
+        ("class", "Auth", "contracts"),
+        ("not-a-known-kind", "Mystery", "contracts"),  # default fallback
+    ],
+)
+def test_render_and_write_routes_by_kind(
+    kind, name, expected_subdir, tmp_path
+):
+    fake_node = {
+        "id": f"src.fake:{name}",
+        "name": name,
+        "kind": kind,
+        "location": {
+            "file_path": "fake.sol",
+            "start_line": 1,
+            "end_line": 10,
+            "start_col": 0,
+            "end_col": 0,
+        },
+        "parameters": [],
+        "return_type": None,
+        "exception_types": [],
+        "cyclomatic_complexity": None,
+        "branches": [],
+        "docstring": None,
+    }
+    out = render_and_write_node_note(tmp_path, fake_node, {}, "ov")
+    assert out.endswith(f"/{expected_subdir}/{name}.md")
+    assert (tmp_path / expected_subdir / f"{name}.md").exists()
+
+
+def test_render_and_write_rejects_method_nodes(transfer_method, tmp_path):
+    with pytest.raises(ValueError, match="method nodes are documented"):
+        render_and_write_node_note(tmp_path, transfer_method, {}, "ov")
+    # And nothing was written
+    assert not any(tmp_path.rglob("*.md"))
+
+
+def test_render_and_write_produces_canonical_template(
+    erc20_contract, tmp_path
+):
+    out = render_and_write_node_note(tmp_path, erc20_contract, {}, "ov")
+    text = Path(out).read_text(encoding="utf-8")
+    # Frontmatter is canonical (not LLM-invented title/path keys)
+    assert text.startswith("---\nname: ERC20\nkind: contract\n")
+    # All 7 sections present
+    for heading in (
+        "## Overview",
+        "## Graph context",
+        "## State",
+        "## Functions",
+        "## Events / Errors / Modifiers",
+        "## Annotations",
+        "## Risks",
+    ):
+        assert heading in text, f"missing {heading}"

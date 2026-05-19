@@ -48,10 +48,10 @@ to the `node-documenter` subagent via the `task` tool.
 Rules:
 - Pass graph_id, node_id, vault_path (absolute), and overview_hint
   verbatim from the user message.
-- The subagent MUST call write_obsidian_note() to persist the note
-  to disk. If its reply does not include an absolute file path that
-  begins with vault_path, dispatch it AGAIN with explicit instructions
-  to actually call write_obsidian_note.
+- The subagent MUST call render_and_write_node_note() to persist the
+  note to disk. If its reply does not include an absolute file path
+  that begins with vault_path, dispatch it AGAIN with explicit
+  instructions to actually call render_and_write_node_note.
 - Do not generate note content yourself. Do not paraphrase the
   subagent's reply. Return only the absolute file path it produced.
 """
@@ -135,8 +135,8 @@ def main() -> int:
     task_msg = (
         f"Document the node `{args.node_id}` in graph `{graph_id}`. "
         f"vault_path (absolute) = {vault}. "
-        f"The subagent must call write_obsidian_note() with this "
-        f"vault_path as its first argument. "
+        f"The subagent must call render_and_write_node_note() with "
+        f"this vault_path as its first argument. "
         f"overview_hint = {args.overview or '(none — write your own)'}"
     )
     result = agent.invoke(

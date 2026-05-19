@@ -2,9 +2,31 @@ import json
 from pathlib import Path
 from typing import Any
 
+from trailmark.models import AnnotationKind
 from trailmark.query.api import QueryEngine
 
 from src.graph.persist import CACHE_ROOT, load_graph, repo_hash, save_graph
+
+# Pre-computed for the error-message valid-kinds list. We expose
+# `str` in our public signature for LLM-friendliness, but convert to
+# the AnnotationKind enum before calling Trailmark — Trailmark's
+# annotate() permissively accepts strings on the write path, but its
+# read path (annotations_of, nodes_with_annotation, clear_annotations)
+# assumes stored kinds are enums and crashes on `.value` access.
+# Converting at the boundary keeps both sides happy.
+_VALID_ANNOTATION_KINDS: frozenset[str] = frozenset(
+    k.value for k in AnnotationKind
+)
+
+
+def _to_annotation_kind(kind: str) -> AnnotationKind:
+    try:
+        return AnnotationKind(kind)
+    except ValueError:
+        valid = ", ".join(sorted(_VALID_ANNOTATION_KINDS))
+        raise ValueError(
+            f"invalid annotation kind {kind!r}: expected one of {valid}"
+        ) from None
 
 
 def trailmark_parse(
@@ -111,3 +133,70 @@ def paths_between(
     """All simple call paths from `src` to `dst`. Each path is a list
     of node IDs starting with `src` and ending with `dst`."""
     return load_graph(graph_id, cache_root=cache_root).paths_between(src, dst)
+
+
+def annotate(
+    graph_id: str,
+    node_id: str,
+    kind: str,
+    description: str,
+    *,
+    source: str = "manual",
+    cache_root: Path = CACHE_ROOT,
+) -> bool:
+    """Add an annotation to `node_id`. Persists to the cache.
+
+    `kind` must be one of Trailmark's AnnotationKind values
+    (e.g. 'assumption', 'invariant', 'finding'). `source` defaults
+    to 'manual'; agents should pass 'llm' or a more specific tag.
+
+    Returns True if added, False if the node rejected it (e.g.,
+    duplicate). Persists changes via save_graph."""
+    kind_enum = _to_annotation_kind(kind)
+    engine = load_graph(graph_id, cache_root=cache_root)
+    result = engine.annotate(node_id, kind_enum, description, source=source)
+    save_graph(engine, graph_id, cache_root=cache_root)
+    return result
+
+
+def annotations_of(
+    graph_id: str,
+    node_id: str,
+    kind: str | None = None,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """All annotations on `node_id`, optionally filtered by kind.
+    Each dict has 'kind', 'description', 'source' keys."""
+    kind_enum = _to_annotation_kind(kind) if kind is not None else None
+    engine = load_graph(graph_id, cache_root=cache_root)
+    return engine.annotations_of(node_id, kind=kind_enum)
+
+
+def nodes_with_annotation(
+    graph_id: str,
+    kind: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Every node carrying an annotation of `kind`. Returns full node
+    dicts (same shape as `list_nodes` output), not bare IDs."""
+    kind_enum = _to_annotation_kind(kind)
+    engine = load_graph(graph_id, cache_root=cache_root)
+    return engine.nodes_with_annotation(kind_enum)
+
+
+def clear_annotations(
+    graph_id: str,
+    node_id: str,
+    kind: str | None = None,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> bool:
+    """Remove annotations from `node_id`. With `kind`, only that kind;
+    without, all annotations on the node. Persists via save_graph."""
+    kind_enum = _to_annotation_kind(kind) if kind is not None else None
+    engine = load_graph(graph_id, cache_root=cache_root)
+    result = engine.clear_annotations(node_id, kind=kind_enum)
+    save_graph(engine, graph_id, cache_root=cache_root)
+    return result

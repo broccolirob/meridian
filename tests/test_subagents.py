@@ -24,9 +24,13 @@ def test_subagent_tools_cover_required_capabilities():
     assert "callees_of" in tool_names
     # source reading
     assert "read_file_range" in tool_names
-    # render layer
-    assert "render_node_note" in tool_names
+    # wikilink resolution
     assert "resolve_wikilink" in tool_names
-    # write side effects
-    assert "write_obsidian_note" in tool_names
+    # combined render+write (the ONLY way to persist a note)
+    assert "render_and_write_node_note" in tool_names
+    # annotate for findings
     assert "annotate" in tool_names
+    # The separable render/write tools must NOT be on the list —
+    # they're the skip vector the 1.5 redesign closed.
+    assert "render_node_note" not in tool_names
+    assert "write_obsidian_note" not in tool_names

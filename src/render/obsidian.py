@@ -291,3 +291,39 @@ def render_node_note(
         _render_risks(ctx),
     ]
     return frontmatter, "\n".join(sections)
+
+
+def render_and_write_node_note(
+    vault_path: str | Path,
+    node: dict[str, Any],
+    graph_ctx: dict[str, Any] | None = None,
+    body: str = "",
+) -> str:
+    """Render canonical note + write to vault in one atomic call.
+
+    Picks rel_path automatically from `node["kind"]` via
+    `KIND_TO_FOLDER`. Returns the absolute file path as a string
+    (LLM-friendly — tool returns are easier to handle when they're
+    primitives, not Path objects).
+
+    Use this from agents instead of calling `render_node_note` +
+    `write_obsidian_note` separately. It guarantees every note uses
+    the canonical 7-section template.
+
+    Raises `ValueError` if `node["kind"] == "method"` — methods are
+    documented inside their parent's note, not as standalone files.
+    """
+    kind = node["kind"]
+    if kind == "method":
+        raise ValueError(
+            f"method nodes are documented inside their parent's "
+            f"note, not as standalone files "
+            f"(got node_id={node['id']!r})"
+        )
+    folder = KIND_TO_FOLDER.get(kind, "contracts")
+    rel_path = f"{folder}/{node['name']}.md"
+    frontmatter, body_text = render_node_note(node, graph_ctx, body)
+    written = write_obsidian_note(
+        vault_path, rel_path, frontmatter, body_text
+    )
+    return str(written)

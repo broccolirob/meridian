@@ -3,6 +3,9 @@ from typing import Any
 
 import yaml
 
+from src.graph.persist import CACHE_ROOT
+from src.tools import get_node
+
 VAULT_SUBDIRS: tuple[str, ...] = (
     "_meta",
     "contracts",
@@ -55,3 +58,51 @@ def write_obsidian_note(
 
     target.write_text("".join(parts), encoding="utf-8")
     return target
+
+
+KIND_TO_FOLDER: dict[str, str] = {
+    "contract": "contracts",
+    "library": "libraries",
+    "interface": "interfaces",
+    "trait": "interfaces",
+    "class": "contracts",
+    "struct": "contracts",
+    "enum": "contracts",
+    "namespace": "contracts",
+    "function": "contracts",
+    "module": "_meta",
+}
+
+
+def resolve_wikilink(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Return an Obsidian wikilink string for `node_id`.
+
+    Top-level kinds (contract, library, interface, etc.) point at
+    their own note: ``[[contracts/Pair|Pair]]``.
+
+    Methods point at their parent's note with a qualified display
+    label: ``[[contracts/Pair|Pair.swap]]``.
+
+    Raises `KeyError` if `node_id` (or, for methods, its parent) is
+    not in the cached graph.
+    """
+    node = get_node(graph_id, node_id, cache_root=cache_root)
+    kind = node["kind"]
+    name = node["name"]
+
+    if kind == "method":
+        parent_id = node_id.rsplit(".", 1)[0]
+        parent = get_node(graph_id, parent_id, cache_root=cache_root)
+        folder = KIND_TO_FOLDER.get(parent["kind"], "contracts")
+        method_name = name.rsplit(".", 1)[-1]
+        return (
+            f"[[{folder}/{parent['name']}|{parent['name']}.{method_name}]]"
+        )
+
+    folder = KIND_TO_FOLDER.get(kind, "contracts")
+    return f"[[{folder}/{name}|{name}]]"

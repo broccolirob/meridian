@@ -40,11 +40,13 @@ def _split(text: str) -> tuple[dict, str]:
 
 def _require_golden() -> str:
     if not GOLDEN_FLOW.exists():
-        rel = GOLDEN_FLOW.relative_to(Path.cwd())
         pytest.skip(
-            f"flow golden not captured yet — run "
-            f"`uv run python scripts/trace_one_flow.py` then "
-            f"`cp .washable/vaults/tier1/flows/swap.md {rel}`"
+            "flow golden missing — regenerate with "
+            "`uv run python scripts/regenerate_swap_golden.py` "
+            "(deterministic, no LLM cost). Or capture a real "
+            "LLM-driven note with `uv run python "
+            "scripts/trace_one_flow.py` then copy to "
+            "tests/golden/flows/UniswapV2Pair.swap.md."
         )
     return GOLDEN_FLOW.read_text(encoding="utf-8")
 

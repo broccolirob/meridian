@@ -1,4 +1,4 @@
-import time
+import os
 
 import pytest
 
@@ -128,9 +128,18 @@ def test_load_graph_invalidates_when_file_rewritten(
     gid = "0123456789ab"
     save_graph(tier0_engine, gid, cache_root=tmp_path)
     e1 = load_graph(gid, cache_root=tmp_path)
-    # 10ms guarantees distinct mtime_ns on any modern filesystem.
-    time.sleep(0.01)
+
     save_graph(tier0_engine, gid, cache_root=tmp_path)
+    # Belt-and-suspenders +1s mtime bump. On nanosecond-resolution
+    # filesystems the two save_graph calls already differ. On
+    # 1-second-resolution filesystems (HFS+, ext3, some NFS mounts)
+    # two saves within the same second collide → cache hit → flake.
+    # Explicit bump makes the test deterministic regardless of FS
+    # clock.
+    engine_path = tmp_path / gid / "engine.pkl"
+    new_ns = engine_path.stat().st_mtime_ns + 1_000_000_000
+    os.utime(engine_path, ns=(new_ns, new_ns))
+
     e2 = load_graph(gid, cache_root=tmp_path)
     assert e1 is not e2
 

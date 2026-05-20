@@ -1,8 +1,9 @@
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
+from langchain_core.tools import InjectedToolArg
 from trailmark.models import AnnotationKind
 from trailmark.query.api import QueryEngine
 
@@ -43,7 +44,7 @@ def trailmark_parse(
     repo_path: str | Path,
     language: str = "auto",
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Parse `repo_path`, persist the engine, return its graph_id."""
     engine = QueryEngine.from_directory(str(repo_path), language=language)
@@ -55,7 +56,7 @@ def trailmark_parse(
 def graph_summary(
     graph_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> dict[str, Any]:
     """Return total_nodes / functions / classes / call_edges /
     dependencies / entrypoints for the cached graph."""
@@ -66,7 +67,7 @@ def list_nodes(
     graph_id: str,
     kind: str | None = None,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Return all node dicts, optionally filtered by kind
     (e.g. 'contract', 'method', 'library', 'module')."""
@@ -82,7 +83,7 @@ def get_node(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> dict[str, Any]:
     """Return one node by id. Raises KeyError if missing."""
     engine = load_graph(graph_id, cache_root=cache_root)
@@ -94,7 +95,7 @@ def callers_of(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Direct callers of `node_id`. Empty list if node is unknown
     or has no callers in this graph."""
@@ -105,7 +106,7 @@ def callees_of(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Direct callees of `node_id`."""
     return load_graph(graph_id, cache_root=cache_root).callees_of(node_id)
@@ -115,7 +116,7 @@ def ancestors_of(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Every function that can transitively reach `node_id` (upward
     slice). Useful for 'who could ever invoke this sink'."""
@@ -126,7 +127,7 @@ def reachable_from(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Every function transitively reachable from `node_id`
     (downward slice). Useful for blast-radius framing."""
@@ -138,7 +139,7 @@ def paths_between(
     src: str,
     dst: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[list[str]]:
     """All simple call paths from `src` to `dst`. Each path is a list
     of node IDs starting with `src` and ending with `dst`."""
@@ -152,7 +153,7 @@ def annotate(
     description: str,
     *,
     source: str = "manual",
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> bool:
     """Add an annotation to `node_id`. Persists to the cache.
 
@@ -177,7 +178,7 @@ def annotations_of(
     node_id: str,
     kind: str | None = None,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """All annotations on `node_id`, optionally filtered by kind.
     Each dict has 'kind', 'description', 'source' keys."""
@@ -190,7 +191,7 @@ def nodes_with_annotation(
     graph_id: str,
     kind: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Every node carrying an annotation of `kind`. Returns full node
     dicts (same shape as `list_nodes` output), not bare IDs."""
@@ -204,7 +205,7 @@ def clear_annotations(
     node_id: str,
     kind: str | None = None,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> bool:
     """Remove annotations from `node_id`. With `kind`, only that kind;
     without, all annotations on the node. Persists via save_graph."""
@@ -252,7 +253,7 @@ def read_node_source(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Return the source code for `node_id` — its full parsed line
     range, read from the file path Trailmark recorded.
@@ -273,7 +274,7 @@ def read_node_source(
 def attack_surface(
     graph_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Return entrypoint specs — external/public functions
     Trailmark identifies as untrusted-input surfaces.
@@ -294,7 +295,7 @@ def entrypoint_paths_to(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[list[str]]:
     """All simple call paths from any attack-surface entrypoint
     to `node_id`. Each path is a list of node IDs starting at an
@@ -323,7 +324,7 @@ def complexity_hotspots(
     graph_id: str,
     threshold: int = 10,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Methods with `cyclomatic_complexity >= threshold`.
 

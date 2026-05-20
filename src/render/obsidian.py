@@ -2,9 +2,10 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
+from langchain_core.tools import InjectedToolArg
 
 from src.graph.persist import CACHE_ROOT
 from src.render.mermaid import (
@@ -125,7 +126,7 @@ def _disambiguated_path(
     node: dict[str, Any],
     graph_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Vault-relative path stem (no `.md`) for a node note.
 
@@ -164,7 +165,7 @@ def resolve_wikilink(
     graph_id: str,
     node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Return an Obsidian wikilink string for `node_id`.
 
@@ -396,7 +397,7 @@ def _pick_primary_method(
     graph_id: str,
     container_node_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str | None:
     """Highest-CC method belonging to `container_node_id`, tiebreak
     by name ascending. Returns None if the container has no methods.
@@ -426,7 +427,7 @@ def render_and_write_node_note(
     graph_ctx: dict[str, Any] | None = None,
     body: str = "",
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Render canonical note + write to vault in one atomic call.
 
@@ -529,7 +530,7 @@ def render_and_write_flow_note(
     overview: str = "",
     observations: list[str] | None = None,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
     """Render a flow note + write to `vault/flows/<name>.md` in
     one atomic call.

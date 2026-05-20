@@ -30,11 +30,16 @@ parsed codebase.
 CRITICAL RULES — read these twice.
 
 1. The ONLY way to persist a note is to call
-   `render_and_write_node_note(vault_path, graph_id, node, graph_ctx, body)`.
+   `render_and_write_node_note(graph_id, node, graph_ctx, body)`.
    You do NOT have `write_obsidian_note` or `render_node_note` —
    they aren't in your tools. The combined tool guarantees the
    canonical 7-section template. If you tried to compose
    frontmatter or section headings yourself, you skipped a step.
+
+   Note: the vault root is supplied by the orchestrator at
+   build time — you do NOT pass `vault_path` as a tool
+   argument. The tool writes to the vault directory configured
+   by the operator who launched washable.
 
 2. `body` is the OVERVIEW NARRATIVE ONLY — 3-5 sentences of prose
    describing what this node does and why. NOTHING ELSE. No
@@ -57,7 +62,6 @@ Inputs you receive in the task message:
 - node_id: Trailmark node id (e.g.,
   "src.tokens.ERC4626:ERC4626"). If kind=="method", redirect to
   parent.
-- vault_path: ABSOLUTE path to the Obsidian vault
 - (optional) overview_hint: hint for the Overview, or empty
 
 Workflow:
@@ -119,8 +123,8 @@ Workflow:
    "assumption", "invariant", "audit_note". Skip the obvious.
 
 9. Call EXACTLY ONCE:
-     render_and_write_node_note(vault_path, graph_id, node,
-                                 graph_ctx, body=overview_string)
+     render_and_write_node_note(graph_id, node, graph_ctx,
+                                 body=overview_string)
    The tool returns the absolute path of the written note.
 
 10. Return that path as your final reply. Just the path. No JSON
@@ -144,9 +148,10 @@ NODE_DOCUMENTER_SUBAGENT: SubAgent = {
         "module) by reading the source, walking the call graph, "
         "resolving wikilinks, and writing one Obsidian note via "
         "render_and_write_node_note. Use one invocation per node. "
-        "Inputs in the task message: graph_id, node_id, vault_path "
-        "(absolute), and an optional overview_hint. Method nodes "
-        "should be redirected to their parent."
+        "Inputs in the task message: graph_id, node_id, and an "
+        "optional overview_hint. Method nodes should be redirected "
+        "to their parent. The vault root is bound by the "
+        "orchestrator — never pass vault_path as a tool argument."
     ),
     "system_prompt": _NODE_DOCUMENTER_PROMPT,
     "tools": [
@@ -174,11 +179,16 @@ a single Obsidian note under vault/flows/.
 CRITICAL RULES — read twice.
 
 1. The ONLY way to persist a note is to call
-   `render_and_write_flow_note(vault_path, graph_id,
-   entrypoint_node, paths, overview, observations)`. You do
-   NOT have `write_obsidian_note` or `render_sequence` — they
-   aren't in your tools. The combined tool guarantees the
-   canonical layout (frontmatter + sequence diagrams).
+   `render_and_write_flow_note(graph_id, entrypoint_node,
+   paths, overview, observations)`. You do NOT have
+   `write_obsidian_note` or `render_sequence` — they aren't in
+   your tools. The combined tool guarantees the canonical
+   layout (frontmatter + sequence diagrams).
+
+   Note: the vault root is supplied by the orchestrator at
+   build time — you do NOT pass `vault_path` as a tool
+   argument. The tool writes to the vault directory configured
+   by the operator who launched washable.
 
 2. `overview` is the NARRATIVE ONLY — 3-5 sentences of prose
    describing what this entrypoint does and what it touches.
@@ -203,7 +213,6 @@ CRITICAL RULES — read twice.
 Inputs you receive in the task message:
 - graph_id: 12-char hex identifying the parsed repo
 - entrypoint_node_id: Trailmark node id of the entrypoint
-- vault_path: ABSOLUTE path to the Obsidian vault
 
 Workflow:
 
@@ -232,7 +241,7 @@ Workflow:
 
 7. Call EXACTLY ONCE:
      render_and_write_flow_note(
-         vault_path, graph_id, entrypoint_node, paths,
+         graph_id, entrypoint_node, paths,
          overview, observations,
      )
    The tool returns the absolute path of the written note.
@@ -257,8 +266,9 @@ FLOW_TRACER_SUBAGENT: SubAgent = {
         "embedding sequence diagrams, and writing a flow note "
         "via render_and_write_flow_note. Use one invocation per "
         "entrypoint from attack_surface(). Inputs in the task "
-        "message: graph_id, entrypoint_node_id, vault_path "
-        "(absolute)."
+        "message: graph_id, entrypoint_node_id. The vault root "
+        "is bound by the orchestrator — never pass vault_path "
+        "as a tool argument."
     ),
     "system_prompt": _FLOW_TRACER_PROMPT,
     "tools": [

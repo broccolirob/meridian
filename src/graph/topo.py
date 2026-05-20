@@ -8,6 +8,9 @@ loop in chunk 2.3 can document parents before children.
 import json
 import logging
 from pathlib import Path
+from typing import Annotated
+
+from langchain_core.tools import InjectedToolArg
 
 from src.graph.persist import CACHE_ROOT, load_graph
 
@@ -76,7 +79,7 @@ def _build_dep_graph(
 def topo_levels(
     graph_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[list[str]]:
     """Return documentable node IDs grouped into dependency levels.
 
@@ -114,7 +117,7 @@ def topo_levels(
 def topo_order(
     graph_id: str,
     *,
-    cache_root: Path = CACHE_ROOT,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> list[str]:
     """Return documentable node IDs in dependency order — bases
     first, derived contracts last.

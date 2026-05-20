@@ -28,10 +28,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
-from deepagents import create_deep_agent
+from deepagents import SubAgent, create_deep_agent
 from langchain_openai import ChatOpenAI
 
 from src.graph.topo import topo_levels, topo_order
+from src.render.obsidian import (
+    render_and_write_flow_note,
+    render_and_write_node_note,
+)
 from src.subagents import FLOW_TRACER_SUBAGENT, NODE_DOCUMENTER_SUBAGENT
 from src.tools import attack_surface, callees_of, graph_summary
 
@@ -124,6 +128,88 @@ Hard rules:
 """
 
 
+def _wrap_subagent_writers(
+    subagent: SubAgent, vault_path: str | Path
+) -> SubAgent:
+    """Replace raw `render_and_write_*_note` functions in a
+    subagent's tool list with closures that pre-bind `vault_path`.
+
+    Chunk 3.17 (C-NEW-2 fix): the second-pass /review verified
+    that LangChain's default schema generation exposed
+    `vault_path` as an LLM-callable parameter on both writers,
+    giving a prompt-injected agent a write-anywhere primitive.
+    The closure approach:
+
+    - Captures the orchestrator's trusted `vault_path` at build
+      time so the LLM cannot supply its own.
+    - Replaces the raw function in the subagent's tool list with
+      a closure whose signature has NO `vault_path` arg, so the
+      LLM tool schema for the closure cannot expose it.
+    - Preserves the original function `__name__` so the LLM sees
+      the same tool name in its system prompt.
+
+    `cache_root` is closed differently — it stays on each tool's
+    Python signature with `Annotated[Path, InjectedToolArg]` and
+    a default value. The default makes it work without the
+    orchestrator supplying it (which deepagents doesn't do for
+    InjectedToolArg-marked params); `InjectedToolArg` hides it
+    from the LLM schema. `vault_path` is a required arg with no
+    sensible default, so it needs this closure approach instead.
+    """
+    def _safe_write_node_note(
+        graph_id: str,
+        node: dict[str, Any],
+        graph_ctx: dict[str, Any] | None = None,
+        body: str = "",
+    ) -> str:
+        """Write a node note. The vault root is supplied by the
+        orchestrator at build time, not by the LLM. Same contract
+        as `render_and_write_node_note` minus `vault_path`."""
+        return render_and_write_node_note(
+            vault_path, graph_id, node, graph_ctx, body
+        )
+
+    def _safe_write_flow_note(
+        graph_id: str,
+        entrypoint_node: dict[str, Any],
+        paths: list[list[str]],
+        overview: str = "",
+        observations: list[str] | None = None,
+    ) -> str:
+        """Write a flow note. The vault root is supplied by the
+        orchestrator at build time, not by the LLM. Same contract
+        as `render_and_write_flow_note` minus `vault_path`."""
+        return render_and_write_flow_note(
+            vault_path,
+            graph_id,
+            entrypoint_node,
+            paths,
+            overview,
+            observations,
+        )
+
+    # Match the LLM-visible tool name to the original. We can't
+    # use functools.wraps because that would copy the full signature
+    # back in (including vault_path), defeating the fix.
+    _safe_write_node_note.__name__ = render_and_write_node_note.__name__
+    _safe_write_node_note.__doc__ = render_and_write_node_note.__doc__
+    _safe_write_flow_note.__name__ = render_and_write_flow_note.__name__
+    _safe_write_flow_note.__doc__ = render_and_write_flow_note.__doc__
+
+    def _replace_writer(t: Any) -> Any:
+        if t is render_and_write_node_note:
+            return _safe_write_node_note
+        if t is render_and_write_flow_note:
+            return _safe_write_flow_note
+        return t
+
+    wrapped: SubAgent = {
+        **subagent,  # type: ignore[typeddict-item]
+        "tools": [_replace_writer(t) for t in subagent["tools"]],
+    }
+    return wrapped
+
+
 def build_agent(
     graph_id: str,
     vault_path: str | Path,
@@ -148,6 +234,10 @@ def build_agent(
     ("Document the node …" → NodeDocumenter; "Trace the
     entrypoint …" → FlowTracer). Python drivers (`dispatch_topo`
     and `dispatch_flows`) handle the enumeration loop.
+
+    Subagent writer tools (`render_and_write_*_note`) are wrapped
+    in closures that pre-bind `vault_path` so the LLM tool schema
+    cannot expose it — chunk 3.17 C-NEW-2 fix.
     """
     # mypy doesn't see pydantic dynamic fields on ChatOpenAI;
     # `request_timeout` is in model_fields (confirmed via probe).
@@ -157,7 +247,10 @@ def build_agent(
     )
     return create_deep_agent(
         model=llm,
-        subagents=[NODE_DOCUMENTER_SUBAGENT, FLOW_TRACER_SUBAGENT],
+        subagents=[
+            _wrap_subagent_writers(NODE_DOCUMENTER_SUBAGENT, vault_path),
+            _wrap_subagent_writers(FLOW_TRACER_SUBAGENT, vault_path),
+        ],
         system_prompt=_build_system_prompt(graph_id, vault_path),
         tools=[
             graph_summary,
@@ -258,13 +351,12 @@ def _validate_node_id(node_id: str) -> None:
 # coupled to them.
 _NODE_DOC_TEMPLATE = (
     "Document the node `{node_id}` in graph `{graph_id}`. "
-    "vault_path (absolute) = {vault_path}. "
     "Dispatch the `node-documenter` subagent via the `task` "
     "tool — do not generate note content yourself."
 )
 _FLOW_TRACE_TEMPLATE = (
     "Trace the entrypoint `{node_id}` in graph "
-    "`{graph_id}`. vault_path (absolute) = {vault_path}. "
+    "`{graph_id}`. "
     "Dispatch the `flow-tracer` subagent via the `task` tool — "
     "do not generate the flow note content yourself."
 )
@@ -290,7 +382,7 @@ def _invoke_one(
     """
     _validate_node_id(node_id)
     task_msg = task_template.format(
-        node_id=node_id, graph_id=graph_id, vault_path=vault_path
+        node_id=node_id, graph_id=graph_id
     )
     result = agent.invoke(
         {"messages": [{"role": "user", "content": task_msg}]}

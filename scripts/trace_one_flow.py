@@ -18,6 +18,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -106,29 +107,26 @@ def main() -> int:
     vault = ensure_vault(args.vault).resolve()
     print(f"[3/3] Running FlowTracer on {args.model}...")
 
-    # Monkey-patch dispatch_flows's attack_surface call to scope
-    # the run to ONE entrypoint. Cleaner than carving out a
-    # parallel dispatch_one_flow function — and reuses every
-    # invariant dispatch_flows already guarantees.
-    import src.agent as agent_module
+    # Scope dispatch to ONE entrypoint via the entrypoint_filter
+    # parameter (chunk 3.15 replaced the prior monkey-patch of
+    # src.agent.attack_surface). No module-global mutation; the
+    # filter is a per-call argument.
+    def _only_this_entrypoint(
+        entrypoints: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            e for e in entrypoints
+            if e["node_id"] == args.entrypoint_id
+        ]
 
-    original = agent_module.attack_surface
-
-    def _focused(_gid, **kwargs):
-        full = original(_gid, **kwargs)
-        return [e for e in full if e["node_id"] == args.entrypoint_id]
-
-    agent_module.attack_surface = _focused  # type: ignore[assignment]
-    try:
-        result = dispatch_flows(
-            graph_id,
-            str(vault),
-            model=args.model,
-            concurrency_cap=DEFAULT_CONCURRENCY_CAP,
-            skip_leaf_entrypoints=False,
-        )
-    finally:
-        agent_module.attack_surface = original
+    result = dispatch_flows(
+        graph_id,
+        str(vault),
+        model=args.model,
+        concurrency_cap=DEFAULT_CONCURRENCY_CAP,
+        skip_leaf_entrypoints=False,
+        entrypoint_filter=_only_this_entrypoint,
+    )
 
     print("---")
     print(f"FLOWS: {result['entrypoint_count']}")

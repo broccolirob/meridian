@@ -423,6 +423,10 @@ def dispatch_flows(
     on_progress: Callable[[int, int, str], None] | None = None,
     skip_leaf_entrypoints: bool = True,
     per_invoke_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT,
+    entrypoint_filter: Callable[
+        [list[dict[str, Any]]], list[dict[str, Any]]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     """Enumerate entrypoints via `attack_surface` and dispatch
     FlowTracer per entrypoint. Returns a summary of what shipped.
@@ -437,6 +441,14 @@ def dispatch_flows(
     failures after the deadline; the dispatch continues. See
     `dispatch_topo` for the rationale (chunk 3.11 / chunk 3.5
     hang).
+
+    `entrypoint_filter` (chunk 3.15) is an optional callable that
+    scopes the dispatch to a subset of the attack surface.
+    Applied AFTER `attack_surface()` and BEFORE
+    `skip_leaf_entrypoints`, so callers can pre-narrow without
+    losing the leaf filter or compose both for selective runs.
+    `scripts/trace_one_flow.py` uses this to run one entrypoint
+    without monkey-patching module globals.
 
     Per-entrypoint exceptions are caught and recorded in `failures`;
     the loop never aborts mid-walk. Mirrors `dispatch_topo`'s shape
@@ -466,6 +478,8 @@ def dispatch_flows(
         )
 
     entrypoints = attack_surface(graph_id)
+    if entrypoint_filter is not None:
+        entrypoints = entrypoint_filter(entrypoints)
     if skip_leaf_entrypoints:
         entrypoints = [
             e for e in entrypoints

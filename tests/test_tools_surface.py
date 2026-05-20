@@ -44,6 +44,65 @@ def test_attack_surface_entries_describe_external_public(tier1_graph_id):
     assert any("external/public" in d for d in descriptions)
 
 
+def test_attack_surface_excludes_internal_methods(tier1_graph_id):
+    """Negative assertion (chunk 3.16, /review I5): Solidity
+    `private`/`internal` methods must NOT appear in
+    attack_surface. The positive tests above (swap/mint/burn
+    present) don't catch a regression where visibility detection
+    breaks and Trailmark surfaces every method — they'd still
+    pass.
+
+    Internals are confirmed present in the graph (via
+    `list_nodes(kind='method')`) before asserting absence from
+    the surface, so the negative assertion isn't vacuous."""
+    from src.tools import list_nodes
+
+    gid, cache_root = tier1_graph_id
+    surface_ids = {
+        item["node_id"]
+        for item in attack_surface(gid, cache_root=cache_root)
+    }
+    method_ids = {
+        n["id"]
+        for n in list_nodes(gid, kind="method", cache_root=cache_root)
+    }
+
+    # UniswapV2Pair's private helpers (`_` prefix per Solidity
+    # convention). Confirmed real method nodes in Tier 1.
+    internal_methods = [
+        "contracts.UniswapV2Pair:UniswapV2Pair._update",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+        "contracts.UniswapV2Pair:UniswapV2Pair._mintFee",
+    ]
+    for nid in internal_methods:
+        assert nid in method_ids, (
+            f"fixture invariant broken: {nid} expected to exist "
+            f"as a method node in Tier 1"
+        )
+        assert nid not in surface_ids, (
+            f"internal method {nid} leaked into attack_surface — "
+            f"Trailmark visibility detection regressed?"
+        )
+
+
+def test_attack_surface_count_is_bounded_for_tier1(tier1_graph_id):
+    """Sanity bound on surface size. Tier 1 has 73 entrypoints
+    (probed) and 91 methods total. Wide bounds catch regressions
+    where the surface either collapses to zero or balloons to
+    return every method (which the negative-assertion test above
+    catches at the per-method level; this catches the aggregate
+    failure mode)."""
+    gid, cache_root = tier1_graph_id
+    surface = attack_surface(gid, cache_root=cache_root)
+    # Lower bound: at least the 3 main Pair entrypoints + interface
+    # methods. Upper bound: well below the 91 total methods so a
+    # "return everything" regression fails this.
+    assert 50 <= len(surface) <= 90, (
+        f"attack_surface size {len(surface)} outside expected "
+        f"Tier 1 range [50, 90] — investigate"
+    )
+
+
 # ---------- entrypoint_paths_to ----------
 
 

@@ -77,26 +77,41 @@ def test_golden_overview_is_real(golden_path):
     )
 
 
+def _strip_fenced_blocks(text: str) -> str:
+    """Drop ```...``` regions. Chunk 3.5 added Mermaid blocks to
+    Graph context, and their syntax (alias decls, classDef lines)
+    legitimately contains no wikilinks — they're diagrams, not
+    link lists. The populated-lines check below targets the
+    Inheritance/Implements/Uses/Callers/Callees lists only."""
+    out = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return "\n".join(out)
+
+
 @pytest.mark.parametrize(
     "golden_path",
     _golden_paths(),
     ids=lambda p: p.name,
 )
 def test_golden_graph_context_wikilinks_when_populated(golden_path):
-    """If any Graph context subsection is populated (not just an italic
+    """If any Graph context list-subsection (Inheritance, Implements,
+    Uses, Callers, Callees) is populated (not just an italic
     placeholder), it must use wikilink syntax — not plain text.
 
     Genuinely isolated nodes (e.g. a leaf library called only via
     Solidity's `using for` syntax that Trailmark doesn't capture as
-    edges) legitimately have all-placeholder Graph context. Don't
-    fail on those."""
+    edges) legitimately have all-placeholder lists. Don't fail on
+    those."""
     _, body = _split_note(golden_path)
     start = body.index("## Graph context")
     end = body.index("\n## ", start + 1)
-    section = body[start:end]
-    # Find non-placeholder lines (anything that's not an italic
-    # placeholder, a heading, or blank). Those are the populated
-    # entries that must contain wikilinks.
+    section = _strip_fenced_blocks(body[start:end])
     populated_lines = [
         ln for ln in section.splitlines()
         if ln.strip()
@@ -105,7 +120,7 @@ def test_golden_graph_context_wikilinks_when_populated(golden_path):
     ]
     if not populated_lines:
         pytest.skip(
-            f"{golden_path.name}: Graph context is entirely "
+            f"{golden_path.name}: Graph context lists are entirely "
             f"placeholders (isolated node — no wikilinks required)"
         )
     assert "[[" in section and "]]" in section, (

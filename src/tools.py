@@ -268,3 +268,61 @@ def read_node_source(
     return read_file_range(
         loc["file_path"], loc["start_line"], loc["end_line"]
     )
+
+
+def attack_surface(
+    graph_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Return entrypoint specs — external/public functions
+    Trailmark identifies as untrusted-input surfaces.
+
+    Each item dict has keys:
+        node_id, trust_level, kind, asset_value, description.
+
+    NOT raw node dicts — unlike `callers_of`/`get_node`, these
+    are entrypoint METADATA. Use `get_node(graph_id,
+    item['node_id'])` for full node detail. The `description`
+    field encodes Trailmark's visibility heuristic
+    (e.g., "Solidity external/public function").
+    """
+    return load_graph(graph_id, cache_root=cache_root).attack_surface()
+
+
+def entrypoint_paths_to(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[list[str]]:
+    """All simple call paths from any attack-surface entrypoint
+    to `node_id`. Each path is a list of node IDs starting at an
+    entrypoint and ending at `node_id`.
+
+    Returns `[]` if `node_id` is itself an entrypoint — no
+    OTHER entrypoint reaches it via call edges (entrypoint-to-
+    entrypoint isn't typically what callers want here).
+    """
+    return load_graph(
+        graph_id, cache_root=cache_root
+    ).entrypoint_paths_to(node_id)
+
+
+def complexity_hotspots(
+    graph_id: str,
+    threshold: int = 10,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Methods with `cyclomatic_complexity >= threshold`.
+
+    Returns full Trailmark node dicts (same shape as
+    `get_node`). Default threshold=10 matches Trailmark and
+    ToB's diagramming-code skill. Tier 1 tops at CC=6 so the
+    default returns `[]`; tests use threshold=4 to surface
+    meaningful content.
+    """
+    return load_graph(graph_id, cache_root=cache_root).complexity_hotspots(
+        threshold=threshold
+    )

@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from src.graph.persist import CACHE_ROOT, load_graph
+from src.render.mermaid_styles import (
+    COMPLEXITY_CLASSDEFS,
+    FOCUS_CLASSDEF,
+    bucket_for_complexity,
+)
 from src.tools import callees_of, callers_of, get_node
 
 _log = logging.getLogger(__name__)
@@ -140,7 +145,7 @@ def render_call_graph(
     for nid in sorted_ids:
         lines.append(f"    {alias[nid]}[{_quoted_label(_bare_name(nid))}]")
     lines.append(f"    class {alias[node_id]} focus;")
-    lines.append("    classDef focus stroke:#f66,stroke-width:3px;")
+    lines.append(f"    {FOCUS_CLASSDEF};")
     for src, dst in sorted(edges):
         lines.append(f"    {alias[src]} --> {alias[dst]}")
     lines.append("```")
@@ -352,5 +357,149 @@ def render_sequence(
         dst_part = _containing_class(path[i + 1])
         dst_label = _method_or_name(path[i + 1])
         lines.append(f"    {src_part}->>{dst_part}: {dst_label}")
+    lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def render_complexity_heatmap(
+    graph_id: str,
+    *,
+    threshold: int = 5,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Render a Mermaid flowchart colored by cyclomatic
+    complexity buckets.
+
+    Only methods with `cyclomatic_complexity >= threshold` are
+    included. Each is tagged `:::low`/`:::medium`/`:::high` based
+    on its CC value (boundaries in `mermaid_styles`). Call edges
+    between included methods are drawn.
+
+    Default threshold=5 matches ToB's diagramming-code skill —
+    surfaces only methods worth attention. Tests use threshold=4
+    to demonstrate multi-bucket output on Tier 1, which tops out
+    at CC=6.
+
+    Returns a fenced Mermaid block. If no methods meet the
+    threshold, emits a flowchart with a single explanatory note
+    rather than empty output.
+
+    Raises:
+        ValueError: if `threshold` is negative.
+    """
+    if threshold < 0:
+        raise ValueError(f"threshold must be >= 0 (got {threshold})")
+
+    engine = load_graph(graph_id, cache_root=cache_root)
+    data = json.loads(engine.to_json())
+    nodes_by_id: dict[str, dict[str, Any]] = data["nodes"]
+
+    # None-CC methods are excluded because threshold semantics
+    # mean "at least this much complexity" — None can't satisfy
+    # that. (The bucket function treats None as low for other
+    # call sites where exclusion isn't desired.)
+    included: dict[str, dict[str, Any]] = {}
+    for nid, n in nodes_by_id.items():
+        if n["kind"] != "method":
+            continue
+        cc = n.get("cyclomatic_complexity")
+        if cc is None or cc < threshold:
+            continue
+        included[nid] = n
+
+    lines = ["```mermaid", "flowchart TB"]
+    if not included:
+        lines.append(
+            f'    empty["No methods with CC >= {threshold}"]'
+        )
+        lines.append("```")
+        return "\n".join(lines) + "\n"
+
+    sorted_ids = sorted(included)
+    alias = {nid: f"n{i}" for i, nid in enumerate(sorted_ids)}
+
+    for nid in sorted_ids:
+        n = included[nid]
+        cc = n["cyclomatic_complexity"]
+        bucket = bucket_for_complexity(cc)
+        bare = _bare_name(nid)
+        label = _quoted_label(f"{bare}, CC={cc}")
+        lines.append(f"    {alias[nid]}[{label}]:::{bucket}")
+
+    edges: set[tuple[str, str]] = set()
+    for e in data["edges"]:
+        if e["kind"] != "calls":
+            continue
+        if e["source"] in included and e["target"] in included:
+            edges.add((e["source"], e["target"]))
+    for src, dst in sorted(edges):
+        lines.append(f"    {alias[src]} --> {alias[dst]}")
+
+    for classdef in COMPLEXITY_CLASSDEFS:
+        lines.append(f"    {classdef}")
+
+    lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def render_containment(
+    graph_id: str,
+    node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Render a Mermaid classDiagram showing `node_id`'s direct
+    methods as a class body.
+
+    `node_id` must be a contract/library/interface/module node.
+    Methods are discovered via `contains` edges where the source
+    is the focus node. Members are listed alphabetically by name,
+    each as `+<name>()` (visibility is `+` uniformly because
+    Trailmark's Solidity parser doesn't yet populate the
+    visibility field).
+
+    Methods with a return type get the type name appended:
+    `+swap() bool`. Trailmark's `return_type` field is a dict
+    (`{"name": str, "module": str | None, "generic_args": list}`)
+    when present and None otherwise — we extract `name`.
+
+    Returns a fenced Mermaid block. A focus with no methods emits
+    a `class <Name>` block with no members.
+
+    Raises:
+        KeyError: if `node_id` isn't in the cached graph.
+    """
+    engine = load_graph(graph_id, cache_root=cache_root)
+    data = json.loads(engine.to_json())
+    nodes_by_id: dict[str, dict[str, Any]] = data["nodes"]
+    if node_id not in nodes_by_id:
+        raise KeyError(node_id)
+
+    focus_bare = _bare_name(node_id)
+    member_ids = [
+        e["target"]
+        for e in data["edges"]
+        if e["kind"] == "contains" and e["source"] == node_id
+    ]
+    # `contains` edges also describe module → contract; restrict
+    # to method members so the class body doesn't list contracts.
+    methods = [
+        nodes_by_id[mid]
+        for mid in member_ids
+        if mid in nodes_by_id and nodes_by_id[mid]["kind"] == "method"
+    ]
+    methods.sort(key=lambda m: m["name"])
+
+    lines = [
+        "```mermaid",
+        "classDiagram",
+        f"    class {focus_bare} {{",
+    ]
+    for m in methods:
+        rt = m.get("return_type")
+        rt_name = rt.get("name") if isinstance(rt, dict) else rt
+        rt_part = f" {rt_name}" if rt_name else ""
+        lines.append(f"        +{m['name']}(){rt_part}")
+    lines.append("    }")
     lines.append("```")
     return "\n".join(lines) + "\n"

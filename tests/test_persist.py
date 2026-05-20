@@ -161,3 +161,63 @@ def test_load_graph_missing_file_raises_filenotfound_after_3_12(
     deep in pickle.load."""
     with pytest.raises(FileNotFoundError):
         load_graph("0d0d0d0d0d0d", cache_root=tmp_path)
+
+
+def test_concurrent_load_graph_returns_same_instance(
+    tier0_graph_id_default_cache,
+):
+    """Chunk 3.25 / I-NEW-5: thundering-herd armor.
+
+    CPython's lru_cache wrapper doesn't serialize the wrapped
+    function call on a miss — multiple concurrent callers can
+    each enter pickle.load and end up with DIFFERENT instances
+    for the same key (the cache only stores one winner; the
+    losers' instances are still held by their callers).
+    Pre-fix this races; post-fix `_LOAD_LOCK` in
+    src/graph/persist.py serializes cache access and all
+    concurrent callers receive the SAME instance.
+
+    Test approach: force a cold cache, then start N threads
+    that all wait on a `threading.Barrier` and fire load_graph
+    simultaneously. After all return, assert every thread got
+    the same instance (`id()` match)."""
+    import threading
+
+    from src.graph.persist import _load_graph_cached, load_graph
+
+    gid = tier0_graph_id_default_cache
+
+    # Force cold cache so all N workers race on a miss.
+    _load_graph_cached.cache_clear()
+
+    instances: list[object] = []
+    instances_lock = threading.Lock()
+    barrier = threading.Barrier(5)
+
+    def loader() -> None:
+        barrier.wait()  # release all 5 simultaneously
+        engine = load_graph(gid)
+        with instances_lock:
+            instances.append(engine)
+
+    threads = [
+        threading.Thread(target=loader) for _ in range(5)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10.0)
+
+    assert len(instances) == 5, (
+        f"expected 5 load_graph results; got {len(instances)} "
+        f"(some threads may have hung)"
+    )
+
+    distinct_ids = {id(e) for e in instances}
+    assert len(distinct_ids) == 1, (
+        f"thundering-herd race: got {len(distinct_ids)} "
+        f"distinct QueryEngine instances from 5 concurrent "
+        f"load_graph calls on a cold cache. Pre-fix the "
+        f"lru_cache doesn't serialize misses; post-fix "
+        f"_LOAD_LOCK in src/graph/persist.py serializes them."
+    )

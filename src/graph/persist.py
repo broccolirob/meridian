@@ -3,11 +3,30 @@ import hashlib
 import os
 import pickle
 import re
+import threading
 from pathlib import Path
 
 from trailmark.query.api import QueryEngine
 
 CACHE_ROOT = Path(".washable/graph")
+
+# Module-level lock that serializes _load_graph_cached
+# invocations (chunk 3.25 / I-NEW-5). CPython's lru_cache is
+# thread-safe for the cache MAP but does NOT serialize the
+# wrapped function call on a miss — two concurrent callers on
+# the same key both enter pickle.load, and the loser's
+# instance is held briefly by its caller while the cache
+# stores the winner's. This lock makes concurrent misses
+# deterministic: only one pickle.load per (graph_id,
+# mtime_ns), and all concurrent callers receive the same
+# cached instance.
+#
+# Cost: hit lookups also acquire the lock, but hits run in
+# microseconds — contention is negligible at washable's
+# typical concurrency (cap=5 workers, ~100 load_graph calls
+# per dispatch). The thundering-herd fix saves 4×pickle.load
+# of wasted I/O on a cold cache.
+_LOAD_LOCK = threading.Lock()
 
 # Graph IDs are the first 12 hex chars of a sha256 — see repo_hash().
 # Validating shape on save/load defends pickle.load against an attacker-
@@ -95,9 +114,12 @@ def load_graph(
     sessions evict in LRU order.
 
     Concurrency: _ANNOTATE_LOCK in src/tools.py serializes the
-    only mutator path. Concurrent readers without writes see the
-    same cached instance; readers that arrive after a write get
-    the fresh mtime → cache miss.
+    only mutator path. _LOAD_LOCK (this module) serializes
+    cache misses so concurrent readers on a cold cache get the
+    SAME instance, not divergent copies — chunk 3.25 / I-NEW-5.
+    Concurrent readers without writes see the same cached
+    instance; readers that arrive after a write get the fresh
+    mtime → cache miss.
 
     Raises:
         ValueError: if `graph_id` doesn't match the 12-hex pattern.
@@ -113,4 +135,8 @@ def load_graph(
             f"graph not in cache: {engine_path}"
         )
     mtime_ns = engine_path.stat().st_mtime_ns
-    return _load_graph_cached(graph_id, cache_root, mtime_ns)
+    # Serialize cache access — hits are ~10us, the lock cost
+    # is microseconds, and concurrent misses become
+    # deterministic (chunk 3.25 / I-NEW-5).
+    with _LOAD_LOCK:
+        return _load_graph_cached(graph_id, cache_root, mtime_ns)

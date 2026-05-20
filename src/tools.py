@@ -10,13 +10,25 @@ from trailmark.query.api import QueryEngine
 
 from src.graph.persist import CACHE_ROOT, load_graph, repo_hash, save_graph
 
-# Process-level lock for the load -> mutate -> save sequence in
-# annotation writes. Without this, two threads in dispatch_topo's
-# ThreadPoolExecutor can both load engine v1, both annotate, and the
-# second save_graph overwrites the first's annotation (lost update).
-# Atomic writes in save_graph fixed the partial-read race, but not
-# this one. Cross-process locking (fcntl.flock) is parked — Phase 2
-# runs in one Python process; multi-process is a future concern.
+# Process-level lock for graph-write paths in src/tools.py
+# (chunk 3.25 / I-NEW-6: scope expanded from "annotation writes
+# only" to "any save_graph caller in this module").
+#
+# Without this:
+#   - Two threads in dispatch_topo's ThreadPoolExecutor can both
+#     load engine v1, both annotate, and the second save_graph
+#     overwrites the first's annotation (lost update). This is
+#     the original chunk 0.3 concern that motivated the lock.
+#   - A concurrent trailmark_parse and annotate (theoretical
+#     today; no caller does this) could race on save_graph —
+#     parse's save and annotate's save would clobber each other.
+#     Chunk 3.25 wraps trailmark_parse's save with this lock as
+#     defense-in-depth.
+#
+# Atomic writes in save_graph (chunk 3.13) fixed the partial-read
+# race but not lost-update. Cross-process locking (fcntl.flock)
+# is parked — Phase 2 runs in one Python process; multi-process
+# is a future concern.
 _ANNOTATE_LOCK = threading.Lock()
 
 # Pre-computed for the error-message valid-kinds list. We expose
@@ -47,10 +59,17 @@ def trailmark_parse(
     *,
     cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
 ) -> str:
-    """Parse `repo_path`, persist the engine, return its graph_id."""
+    """Parse `repo_path`, persist the engine, return its graph_id.
+
+    Chunk 3.25 / I-NEW-6: the save_graph call is serialized
+    under `_ANNOTATE_LOCK` so a future flow that runs parse
+    concurrently with annotate can't lose updates. No behavior
+    change for today's one-shot-pre-dispatch usage.
+    """
     engine = QueryEngine.from_directory(str(repo_path), language=language)
     rh = repo_hash(repo_path)
-    save_graph(engine, rh, cache_root=cache_root)
+    with _ANNOTATE_LOCK:
+        save_graph(engine, rh, cache_root=cache_root)
     return rh
 
 

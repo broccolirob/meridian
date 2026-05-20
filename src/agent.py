@@ -695,6 +695,34 @@ def dispatch_topo(
     should call the tool functions directly with explicit
     `cache_root=` instead of going through dispatch_topo.
 
+    Level-gating limitation (chunk 3.24 / I-NEW-4): the per-level
+    barrier ensures level N+1 only STARTS after every level-N
+    future has been drained from `pending` (via completion or
+    per-invoke timeout). However, `pool.shutdown(wait=False,
+    cancel_futures=True)` lets a per-invoke-timed-out worker keep
+    running in its daemon thread (Python can't kill threads). If
+    the worker's `agent.invoke()` eventually completes — e.g., a
+    hung LLM API call that recovers AFTER the timeout fired — it
+    may write a file to vault AFTER level N+1 has already started.
+
+    Observable effects:
+    - The dispatch summary records the node as failed (CORRECT —
+      the timeout fired and `pending` was discarded; the summary
+      reflects what the orchestrator saw).
+    - A file may nevertheless appear on disk after the failure
+      was recorded. Downstream consumers should treat the run
+      summary as authoritative; orphan late-writes are harmless
+      (atomic, well-formed) but contradict the failure record.
+
+    Rate in practice: low. `per_invoke_timeout=600s` is generous
+    vs. typical 15-60s invokes. A worker completing in the
+    (600s, 600s+epsilon) window requires a hung LLM API call that
+    recovers in a narrow window. If this becomes a real
+    production issue, change `wait=False` → `wait=True` in
+    `_run_pool`'s shutdown call, accepting that the dispatcher
+    will block until all workers complete (re-introducing the
+    chunk 3.5 hang exposure).
+
     Returns:
         {
             "graph_id":    str,

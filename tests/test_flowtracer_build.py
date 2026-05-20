@@ -86,6 +86,16 @@ def test_render_and_write_flow_note_produces_valid_note(
     assert "## Observations" in text
     assert "obs one" in text
     assert "obs two" in text
+    # Chunk 3.9: per-path Hops list with method-level wikilinks
+    assert text.count("**Hops:**") == 2  # one per path
+    assert "[[contracts/UniswapV2Pair|UniswapV2Pair.swap]]" in text
+    assert (
+        "[[contracts/UniswapV2Pair|UniswapV2Pair._safeTransfer]]"
+        in text
+    )
+    assert (
+        "[[contracts/UniswapV2Pair|UniswapV2Pair._update]]" in text
+    )
 
 
 def test_render_and_write_flow_note_empty_paths_emits_placeholder(

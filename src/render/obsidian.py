@@ -477,6 +477,21 @@ def render_and_write_flow_note(
                 parts.append(
                     f"_Sequence diagram unavailable: {e}_\n\n"
                 )
+            # Hop wikilinks (chunk 3.9): per-method navigation
+            # below the sequence diagram. Unresolvable hops fall
+            # back to a backticked bare name.
+            parts.append("\n**Hops:**\n\n")
+            for j, hop_id in enumerate(path, 1):
+                try:
+                    link = resolve_wikilink(
+                        graph_id, hop_id, cache_root=cache_root
+                    )
+                    parts.append(f"{j}. {link}\n")
+                except KeyError:
+                    hop_bare = hop_id.rsplit(":", 1)[-1]
+                    parts.append(
+                        f"{j}. `{hop_bare}` (no contract note)\n"
+                    )
             parts.append("\n")
     else:
         parts.append(

@@ -296,23 +296,36 @@ def test_node_note_qualifies_filename_on_bare_name_collision(
         "kind": "contract",
     }
 
-    real_list_nodes = obsidian.list_nodes
+    from src.graph.persist import _load_graph_cached
 
-    def patched(graph_id, *, kind=None, cache_root=None):
-        nodes = real_list_nodes(
-            graph_id, kind=kind, cache_root=cache_root
-        )
-        return nodes + [sibling]
+    real_build = obsidian._build_collision_map
 
-    monkeypatch.setattr(obsidian, "list_nodes", patched)
+    def patched_build(engine):
+        collision_map = real_build(engine)
+        collision_map.setdefault(
+            ("contracts", sibling["name"]), set()
+        ).add(sibling["id"])
+        return collision_map
 
-    out = render_and_write_node_note(
-        tmp_path, gid, erc20, {}, "ov", cache_root=cache_root
+    monkeypatch.setattr(
+        obsidian, "_build_collision_map", patched_build
     )
-    # Qualified with the real ERC20's module prefix.
-    assert out.endswith("/contracts/src.tokens.ERC20.ERC20.md")
-    # And the qualified file actually exists (no silent overwrite).
-    assert Path(out).exists()
+    # Force a fresh engine so patched_build fires. The
+    # injected sibling mutates the cached map on the engine
+    # instance; clear again on teardown so the mutation
+    # doesn't leak into subsequent tests using the same
+    # session-scoped engine.
+    _load_graph_cached.cache_clear()
+    try:
+        out = render_and_write_node_note(
+            tmp_path, gid, erc20, {}, "ov", cache_root=cache_root
+        )
+        # Qualified with the real ERC20's module prefix.
+        assert out.endswith("/contracts/src.tokens.ERC20.ERC20.md")
+        # And the qualified file actually exists (no silent overwrite).
+        assert Path(out).exists()
+    finally:
+        _load_graph_cached.cache_clear()
 
 
 def test_resolve_wikilink_returns_bare_path_when_no_collision(

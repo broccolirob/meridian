@@ -116,8 +116,7 @@ becomes real — until then, treat that step as a no-op):
    augmented graph. [Phase 4 — skip for now.]
 
 9. Write the root `README.md` map-of-content into vault_path with
-   wikilinks into every populated section. [Chunk 2.4 — skip for
-   now.]
+   wikilinks into every populated section. [Phase 2 — skip for now.]
 
 Hard rules:
 - Do NOT invent your own document structure. Subagents own per-note

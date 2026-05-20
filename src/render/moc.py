@@ -100,8 +100,7 @@ def write_root_moc(
     """Write the root README.md + a README.md inside each populated
     section folder. Returns the list of paths written (root first).
 
-    Skips empty folders — the MOC only links to populated ones,
-    matching the chunk 2.4 success criterion.
+    Skips empty folders — the MOC only links to populated ones.
     """
     vault = Path(vault_path)
     summary = graph_summary(graph_id, cache_root=cache_root)

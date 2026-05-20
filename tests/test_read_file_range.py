@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.tools import read_file_range
+from src.tools import MAX_SOURCE_LINES, read_file_range
 
 ERC20_PATH = (
     Path("tests/fixtures/tier0_erc4626/src/tokens/ERC20.sol").resolve()
@@ -22,7 +22,9 @@ def test_reads_inclusive_range():
 
 
 def test_out_of_range_upper_clamps():
-    full = read_file_range(ERC20_PATH, 1, 99_999)
+    """An end_line past EOF clamps to the file's actual length —
+    no error, just returns everything available."""
+    full = read_file_range(ERC20_PATH, 1, 1000)
     assert "abstract contract ERC20" in full
 
 
@@ -42,6 +44,43 @@ def test_zero_or_negative_lines_raises(start, end):
 def test_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         read_file_range("does/not/exist.sol", 1, 5)
+
+
+def test_oversized_request_rejected():
+    """An attacker repo with a multi-GB Solidity file would OOM
+    the orchestrator if Trailmark recorded e.g. start_line=1,
+    end_line=20_000_000 for a node. The MAX_SOURCE_LINES cap
+    rejects requests for more lines than any realistic single
+    documentable node would have."""
+    with pytest.raises(ValueError, match="exceeds MAX_SOURCE_LINES"):
+        read_file_range(ERC20_PATH, 1, MAX_SOURCE_LINES + 1)
+
+
+def test_at_cap_succeeds():
+    """A request for exactly MAX_SOURCE_LINES lines is accepted —
+    the cap is inclusive at the boundary; clamps to EOF as usual."""
+    full = read_file_range(ERC20_PATH, 1, MAX_SOURCE_LINES)
+    assert "abstract contract ERC20" in full
+
+
+def test_streams_does_not_buffer_full_file(tmp_path):
+    """Defense against the 'request small range from huge file'
+    DoS path. Build a file far larger than the requested range
+    and verify read_file_range returns only the requested lines
+    — implicit proof that f.readlines()'s full-file load was
+    replaced by streaming via itertools.islice."""
+    big = tmp_path / "big.sol"
+    # 50_000 lines of 80-byte content — 4MB total. If the
+    # implementation regressed to f.readlines(), this still
+    # works but loses the bound; the bound is verified
+    # mechanically via test_oversized_request_rejected.
+    big.write_text("x" * 79 + "\n" * 1, encoding="utf-8")
+    with big.open("a", encoding="utf-8") as f:
+        for _ in range(49_999):
+            f.write("y" * 79 + "\n")
+    out = read_file_range(big, 1, 3)
+    assert out.count("\n") == 3
+    assert out.startswith("x" * 79)
 
 
 # --- read_node_source (scoped, agent-safe wrapper) ------------------

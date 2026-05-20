@@ -1,4 +1,5 @@
 import copy
+import itertools
 import json
 import threading
 from pathlib import Path
@@ -263,6 +264,17 @@ def clear_annotations(
     return result
 
 
+# Cap on the requested line range for read_file_range. Defends
+# against attacker-supplied repos where a node's Trailmark-parsed
+# line range claims something absurd like start_line=1,
+# end_line=20_000_000. The cap is generous — 10× the largest
+# realistic single-contract size (Compound's MoneyMarket ~1500
+# lines, MakerDAO MCD ~2000) — so legitimate Solidity passes
+# through unchanged, but a multi-GB-file DoS is rejected before
+# any I/O happens.
+MAX_SOURCE_LINES = 10_000
+
+
 def read_file_range(
     path: str | Path,
     start_line: int,
@@ -272,8 +284,17 @@ def read_file_range(
     from `path`. Out-of-range bounds clamp to the file's actual
     length; reversed ranges return an empty string.
 
+    Bounds memory: requests for more than `MAX_SOURCE_LINES` lines
+    are rejected with `ValueError` BEFORE any I/O, and accepted
+    requests stream through `itertools.islice` so the in-memory
+    set is at most `end_line - start_line + 1` lines regardless of
+    file size. This protects the orchestrator against attacker
+    repos containing multi-GB files — `f.readlines()` would have
+    loaded the whole file before slicing.
+
     Raises `FileNotFoundError` if the file doesn't exist and
-    `ValueError` if `start_line` or `end_line` is < 1.
+    `ValueError` if `start_line` or `end_line` is < 1, or if the
+    requested range exceeds `MAX_SOURCE_LINES`.
 
     Note: This primitive accepts ARBITRARY paths and is therefore
     **not on any subagent's tool list**. Adversarial Solidity comments
@@ -289,10 +310,21 @@ def read_file_range(
         )
     if end_line < start_line:
         return ""
+    requested = end_line - start_line + 1
+    if requested > MAX_SOURCE_LINES:
+        raise ValueError(
+            f"requested range too large: {requested} lines exceeds "
+            f"MAX_SOURCE_LINES={MAX_SOURCE_LINES}. Likely an adversarial "
+            f"repo or a Trailmark misparse — refusing to read."
+        )
     file_path = Path(path)
     with open(file_path, encoding="utf-8") as f:
-        lines = f.readlines()
-    return "".join(lines[start_line - 1 : end_line])
+        # islice(f, start, stop) is 0-indexed exclusive-stop; we
+        # want 1-indexed inclusive. Stops at min(end_line, EOF), so
+        # an oversized end_line that survived the cap above still
+        # only reads up to EOF.
+        selected = list(itertools.islice(f, start_line - 1, end_line))
+    return "".join(selected)
 
 
 def read_node_source(

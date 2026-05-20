@@ -1,8 +1,8 @@
-"""Topological ordering for chunk 2.1.
+"""Topological ordering of documentable nodes.
 
-Returns documentable nodes (kinds: contract, library, interface,
-module) in dependency order — bases before derived — so the dispatch
-loop in chunk 2.3 can document parents before children.
+Returns nodes (kinds: contract, library, interface, module) in
+dependency order — bases before derived — so the dispatch loop can
+document parents before children.
 """
 
 import json
@@ -17,7 +17,7 @@ from src.graph.persist import CACHE_ROOT, load_graph
 _log = logging.getLogger(__name__)
 
 # Documentable kinds — methods are documented inside their parent's
-# note (chunk 1.3 design) and don't need their own topo position.
+# note and don't need their own topo position.
 DOCUMENTABLE_KINDS: frozenset[str] = frozenset(
     {"contract", "library", "interface", "module"}
 )

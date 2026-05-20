@@ -144,6 +144,39 @@ def test_load_graph_invalidates_when_file_rewritten(
     assert e1 is not e2
 
 
+def test_load_graph_invalidates_when_mtime_unchanged(
+    tier0_engine, tmp_path
+):
+    """Coarse-FS scenario: two save_graph calls within the same
+    second on HFS+ / ext3 / some NFS mounts produce identical
+    mtime_ns. Without explicit cache invalidation inside save_graph,
+    the second load_graph hits a stale cache entry → returns the
+    pre-save engine → silent lost-update inside _ANNOTATE_LOCK.
+
+    Test approach: save twice, then freeze mtime back to its pre-
+    second-save value to simulate coarse-FS resolution. The fix
+    (save_graph calls cache_clear after os.replace) must guarantee
+    e2 is a fresh instance regardless of FS clock behavior."""
+    _load_graph_cached.cache_clear()
+    gid = "0123456789ab"
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    e1 = load_graph(gid, cache_root=tmp_path)
+
+    engine_path = tmp_path / gid / "engine.pkl"
+    frozen_ns = engine_path.stat().st_mtime_ns
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    # Freeze mtime to simulate coarse-resolution FS where both
+    # saves landed in the same FS-clock tick.
+    os.utime(engine_path, ns=(frozen_ns, frozen_ns))
+
+    e2 = load_graph(gid, cache_root=tmp_path)
+    assert e1 is not e2, (
+        "save_graph must invalidate the load cache regardless of "
+        "FS mtime resolution; otherwise coarse-FS users hit silent "
+        "lost-update inside _ANNOTATE_LOCK"
+    )
+
+
 def test_load_graph_distinct_graph_ids_get_distinct_entries(
     tier0_engine, tmp_path
 ):

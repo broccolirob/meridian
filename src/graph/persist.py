@@ -103,8 +103,9 @@ def save_graph(
     # reader (e.g. another tool call) opens engine.pkl while a writer
     # is mid-pickle.dump and hits EOFError. PID in the tmp name keeps
     # concurrent writers from clobbering each other's tmp.
-    # (Lost-update — two writers racing on the same graph — is still
-    # parked for chunk 2.3 where multi-agent dispatch lands.)
+    # Lost-update (two writers racing on the same graph) is handled by
+    # _ANNOTATE_LOCK in src/tools.py; cross-process locking is out of
+    # scope.
     tmp_path = out_dir / f".engine.pkl.tmp.{os.getpid()}"
     try:
         with open(tmp_path, "wb") as f:
@@ -116,6 +117,15 @@ def save_graph(
         except OSError:
             pass
         raise
+    # Invalidate the load cache explicitly. _load_graph_cached keys
+    # on (graph_id, cache_root, mtime_ns), but coarse-resolution
+    # filesystems (HFS+, ext3, some NFS mounts) only tick mtime per
+    # second. Two saves within the same second produce identical
+    # mtime_ns → next load hits the stale cache → silent lost-update
+    # inside _ANNOTATE_LOCK. cache_clear() makes invalidation
+    # deterministic regardless of FS clock resolution. Cost is
+    # negligible — maxsize=4, at most 4 entries evicted.
+    _load_graph_cached.cache_clear()
     return final_path
 
 
@@ -126,10 +136,12 @@ def _load_graph_cached(
     mtime_ns: int,
 ) -> QueryEngine:
     """Inner cache layer. Keyed by (graph_id, cache_root, mtime_ns).
-    The mtime component ensures invalidation: save_graph's atomic
-    os.replace (chunk 0.3) updates mtime atomically with the
-    rename, so the next call gets a fresh cache key → miss →
-    fresh pickle.load.
+
+    The mtime_ns component is necessary but not sufficient for
+    invalidation — coarse-resolution filesystems can produce
+    identical mtime_ns for back-to-back saves. save_graph compensates
+    by calling cache_clear() after each write, so the next call is
+    guaranteed a fresh pickle.load regardless of FS clock behavior.
 
     Private — validation already happened in the outer load_graph.
     """
@@ -147,9 +159,11 @@ def load_graph(
     Memoized via an mtime-aware lru_cache: identical (graph_id,
     cache_root) pairs return the SAME in-process QueryEngine
     instance until the underlying file is rewritten by
-    save_graph. save_graph's atomic os.replace bumps mtime
-    atomically with the rename, so cache invalidation is
-    automatic — no cache_clear() call needed at the writer.
+    save_graph. save_graph calls cache_clear() after its atomic
+    os.replace, so invalidation is deterministic even on
+    coarse-mtime filesystems (HFS+, ext3, some NFS mounts) where
+    two saves within the same second would otherwise produce
+    identical mtime_ns and collide on the cache key.
 
     Cache size: 4 entries (see _load_graph_cached). Sufficient
     for the common case (one graph per dispatch); rare cross-
@@ -160,7 +174,7 @@ def load_graph(
     cache misses so concurrent readers on a cold cache get the
     SAME instance, not divergent copies. Readers without writes
     see the same cached instance; readers that arrive after a
-    write get the fresh mtime → cache miss.
+    write get a cleared cache → fresh pickle.load.
 
     Raises:
         ValueError: if `graph_id` doesn't match the 12-hex pattern.

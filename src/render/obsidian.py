@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import pickle
@@ -8,8 +9,9 @@ from typing import Annotated, Any
 
 import yaml
 from langchain_core.tools import InjectedToolArg
+from trailmark.query.api import QueryEngine
 
-from src.graph.persist import CACHE_ROOT
+from src.graph.persist import CACHE_ROOT, load_graph
 from src.render.mermaid import (
     render_call_graph,
     render_inheritance,
@@ -181,6 +183,29 @@ KIND_TO_FOLDER: dict[str, str] = {
 }
 
 
+def _build_collision_map(
+    engine: QueryEngine,
+) -> dict[tuple[str, str], set[str]]:
+    """Map (folder, bare_name) → set of node IDs routing there.
+
+    Computed once per engine instance and lazy-attached by
+    `_disambiguated_path`. Nodes whose kind has no
+    `KIND_TO_FOLDER` entry (e.g. `method`, documented inside its
+    parent's note) are skipped — they don't get their own files
+    and can't collide on filename.
+    """
+    data = json.loads(engine.to_json())
+    collision_map: dict[tuple[str, str], set[str]] = {}
+    for nid, n in data["nodes"].items():
+        folder = KIND_TO_FOLDER.get(n["kind"])
+        if folder is None:
+            continue
+        collision_map.setdefault(
+            (folder, n["name"]), set()
+        ).add(nid)
+    return collision_map
+
+
 def _disambiguated_path(
     node: dict[str, Any],
     graph_id: str,
@@ -199,21 +224,26 @@ def _disambiguated_path(
     and `resolve_wikilink` (the link target) so they stay in
     sync — wikilinks always point at whatever filename the writer
     picks.
+
+    Performance: lazy-attaches a collision map to the cached
+    engine instance returned by `load_graph`. The map is built
+    once on first use and reused for every subsequent resolve on
+    the same engine. `save_graph`'s `cache_clear()` evicts the
+    engine, so the next `load_graph` returns a fresh instance
+    without the attribute → the map gets rebuilt. No separate
+    invalidation needed.
     """
     kind = node["kind"]
     folder = KIND_TO_FOLDER.get(kind, "contracts")
     bare = node["name"]
 
-    same_folder_kinds = {
-        k for k, f in KIND_TO_FOLDER.items() if f == folder
-    }
-    others = [
-        n
-        for n in list_nodes(graph_id, cache_root=cache_root)
-        if n["kind"] in same_folder_kinds
-        and n["name"] == bare
-        and n["id"] != node["id"]
-    ]
+    engine = load_graph(graph_id, cache_root=cache_root)
+    collision_map = getattr(engine, "_washable_collision_map", None)
+    if collision_map is None:
+        collision_map = _build_collision_map(engine)
+        setattr(engine, "_washable_collision_map", collision_map)
+
+    others = collision_map.get((folder, bare), set()) - {node["id"]}
     if not others:
         return f"{folder}/{bare}"
     module = node["id"].rsplit(":", 1)[0]

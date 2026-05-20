@@ -299,6 +299,100 @@ def _invoke_one(
     return {"node_id": node_id, "agent_reply": last}
 
 
+def _make_recorder(
+    successes: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    *,
+    total: int,
+    on_progress: Callable[[int, int, str], None] | None,
+) -> Callable[[str, str, Any], None]:
+    """Build the on_done callback shared by both dispatchers
+    (chunk 3.16, /review I16). Appends successful invokes to
+    `successes`, failures to `failures` (with a `"node_id"` key
+    even for entrypoints — the failure dict shape is uniform),
+    and fires `on_progress(idx, total, item_id)` per completed
+    item.
+
+    The returned closure owns its own progress index that
+    accumulates across multiple `_run_pool` calls — this is
+    what makes `dispatch_topo`'s per-level loop emit a single
+    1..N progress sequence across all levels rather than
+    restarting at 1 per level.
+
+    The recorder runs in the main thread (driven by
+    `_gather_with_per_invoke_timeout`'s drain loop), so the
+    `nonlocal progress_idx` mutation is single-threaded — no
+    lock needed.
+    """
+    progress_idx = 0
+
+    def _record(item_id: str, status: str, info: Any) -> None:
+        nonlocal progress_idx
+        progress_idx += 1
+        if on_progress is not None:
+            on_progress(progress_idx, total, item_id)
+        if status == "ok":
+            successes.append(info)
+        else:
+            failures.append({"node_id": item_id, "error": info})
+
+    return _record
+
+
+def _run_pool(
+    items: list[str],
+    invoke_fn: Callable[[str], dict[str, Any]],
+    *,
+    concurrency_cap: int,
+    per_invoke_timeout: float,
+    on_done: Callable[[str, str, Any], None],
+    log_kind: str,
+) -> None:
+    """Run one batch of items through a ThreadPoolExecutor with
+    per-invocation timeout (chunk 3.11). For each item:
+
+      - `invoke_fn(item)` returns → `on_done(item, "ok", result_dict)`
+      - any exception           → `on_done(item, "fail", "ExcType: msg")`
+      - exceeds per_invoke_timeout → `on_done(..., "fail", "TimeoutError: ...")`
+
+    `dispatch_topo` calls this once per topological level (the
+    inheritance-aware level boundary survives in the caller);
+    `dispatch_flows` calls it once with the flat entrypoint list.
+    Chunk 3.16's /review I16 extracted the pool plumbing from
+    both dispatchers — it was byte-identical except for the
+    log-kind prefix in the exception path.
+
+    Pool uses explicit shutdown(wait=False, cancel_futures=True)
+    instead of context manager because the `with` form blocks
+    on hung workers (chunk 3.5 hang). Hung workers are daemon
+    threads and die when the process exits.
+
+    `log_kind` distinguishes log messages between dispatchers
+    ("dispatch" vs "flow dispatch"). Kept as a parameter — not
+    derived from invoke_fn — so log greps for "flow dispatch
+    failed" continue to match.
+    """
+    def _try_one(item_id: str) -> tuple[str, Any]:
+        try:
+            return ("ok", invoke_fn(item_id))
+        except Exception as e:
+            _log.exception("%s failed for %s", log_kind, item_id)
+            return ("fail", f"{type(e).__name__}: {e}")
+
+    pool = ThreadPoolExecutor(max_workers=concurrency_cap)
+    try:
+        futures_map = {
+            pool.submit(_try_one, item): item for item in items
+        }
+        _gather_with_per_invoke_timeout(
+            futures_map,
+            per_invoke_timeout=per_invoke_timeout,
+            on_done=on_done,
+        )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def dispatch_topo(
     graph_id: str,
     vault_path: str,
@@ -372,49 +466,29 @@ def dispatch_topo(
 
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    progress_idx = 0
+    record = _make_recorder(
+        successes, failures,
+        total=len(order),
+        on_progress=on_progress,
+    )
 
-    def _try_one(node_id: str) -> tuple[str, Any]:
-        try:
-            return ("ok", _invoke_one(agent, graph_id, node_id, vault_path))
-        except Exception as e:
-            _log.exception("dispatch failed for %s", node_id)
-            return ("fail", f"{type(e).__name__}: {e}")
-
-    def _record(nid: str, status: str, info: Any) -> None:
-        nonlocal progress_idx
-        progress_idx += 1
-        if on_progress is not None:
-            on_progress(progress_idx, len(order), nid)
-        if status == "ok":
-            successes.append(info)
-        else:
-            failures.append({"node_id": nid, "error": info})
-
-    # Dispatch one level at a time. Within a level, all nodes are
-    # independent (verified by topo_levels); they run in parallel up
-    # to concurrency_cap. Across levels, we wait for the level to
-    # finish before starting the next — that's what guarantees a
-    # derived contract's wikilink targets exist on disk by the time
-    # the derived contract's NodeDocumenter runs.
-    #
-    # Pool uses explicit shutdown(wait=False, cancel_futures=True)
-    # instead of context manager because the `with` form blocks on
-    # hung workers (chunk 3.5 hang). Hung workers are daemon
-    # threads and die when the process exits.
+    # Dispatch one level at a time. Within a level, nodes are
+    # independent (verified by topo_levels) — _run_pool fans them
+    # out up to concurrency_cap. Across levels, we wait for the
+    # level to finish before starting the next; that's what
+    # guarantees a derived contract's wikilink targets exist on
+    # disk by the time the derived contract's NodeDocumenter
+    # runs. (Reusing one `record` across levels keeps the
+    # progress index 1..N rather than restarting per level.)
     for level in levels:
-        pool = ThreadPoolExecutor(max_workers=concurrency_cap)
-        try:
-            futures_map = {
-                pool.submit(_try_one, nid): nid for nid in level
-            }
-            _gather_with_per_invoke_timeout(
-                futures_map,
-                per_invoke_timeout=per_invoke_timeout,
-                on_done=_record,
-            )
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+        _run_pool(
+            level,
+            lambda nid: _invoke_one(agent, graph_id, nid, vault_path),
+            concurrency_cap=concurrency_cap,
+            per_invoke_timeout=per_invoke_timeout,
+            on_done=record,
+            log_kind="dispatch",
+        )
 
     return {
         "graph_id": graph_id,
@@ -518,42 +592,22 @@ def dispatch_flows(
     )
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    progress_idx = 0
+    record = _make_recorder(
+        successes, failures,
+        total=len(order),
+        on_progress=on_progress,
+    )
 
-    def _try_one(eid: str) -> tuple[str, Any]:
-        try:
-            return (
-                "ok",
-                _invoke_one_flow(agent, graph_id, eid, vault_path),
-            )
-        except Exception as e:
-            _log.exception("flow dispatch failed for %s", eid)
-            return ("fail", f"{type(e).__name__}: {e}")
-
-    def _record(eid: str, status: str, info: Any) -> None:
-        nonlocal progress_idx
-        progress_idx += 1
-        if on_progress is not None:
-            on_progress(progress_idx, len(order), eid)
-        if status == "ok":
-            successes.append(info)
-        else:
-            failures.append({"node_id": eid, "error": info})
-
-    # Entrypoints are independent — flat parallel pool, no
+    # Entrypoints are independent — one flat _run_pool call, no
     # level-gating (unlike dispatch_topo's inheritance-aware walk).
-    # See dispatch_topo for the rationale on explicit
-    # shutdown(wait=False, cancel_futures=True) vs context manager.
-    pool = ThreadPoolExecutor(max_workers=concurrency_cap)
-    try:
-        futures_map = {pool.submit(_try_one, eid): eid for eid in order}
-        _gather_with_per_invoke_timeout(
-            futures_map,
-            per_invoke_timeout=per_invoke_timeout,
-            on_done=_record,
-        )
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    _run_pool(
+        order,
+        lambda eid: _invoke_one_flow(agent, graph_id, eid, vault_path),
+        concurrency_cap=concurrency_cap,
+        per_invoke_timeout=per_invoke_timeout,
+        on_done=record,
+        log_kind="flow dispatch",
+    )
 
     return {
         "graph_id": graph_id,

@@ -27,7 +27,7 @@ parsed codebase.
 CRITICAL RULES — read these twice.
 
 1. The ONLY way to persist a note is to call
-   `render_and_write_node_note(vault_path, node, graph_ctx, body)`.
+   `render_and_write_node_note(vault_path, graph_id, node, graph_ctx, body)`.
    You do NOT have `write_obsidian_note` or `render_node_note` —
    they aren't in your tools. The combined tool guarantees the
    canonical 7-section template. If you tried to compose
@@ -42,6 +42,12 @@ CRITICAL RULES — read these twice.
    method node_id, redirect: document the parent contract/library
    instead. The method appears inside the parent's
    `## Functions` section automatically.
+
+4. Diagrams (inheritance + call graph) are computed for you by
+   `render_and_write_node_note` from `graph_id`. Do NOT add
+   `inheritance_mermaid` or `call_graph_mermaid` keys to
+   `graph_ctx` yourself — they will be overwritten. The Mermaid
+   renderers are not in your tool list for a reason.
 
 Inputs you receive in the task message:
 - graph_id: 12-char hex identifying the parsed repo
@@ -110,8 +116,8 @@ Workflow:
    "assumption", "invariant", "audit_note". Skip the obvious.
 
 9. Call EXACTLY ONCE:
-     render_and_write_node_note(vault_path, node, graph_ctx,
-                                 body=overview_string)
+     render_and_write_node_note(vault_path, graph_id, node,
+                                 graph_ctx, body=overview_string)
    The tool returns the absolute path of the written note.
 
 10. Return that path as your final reply. Just the path. No JSON

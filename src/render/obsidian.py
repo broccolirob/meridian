@@ -1,10 +1,14 @@
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from src.graph.persist import CACHE_ROOT
-from src.tools import get_node
+from src.render.mermaid import render_call_graph, render_inheritance
+from src.tools import get_node, list_nodes
+
+_log = logging.getLogger(__name__)
 
 VAULT_SUBDIRS: tuple[str, ...] = (
     "_meta",
@@ -139,14 +143,24 @@ def _render_link_list(items: list[str], empty_msg: str) -> str:
 
 
 def _render_graph_context(graph_ctx: dict[str, Any]) -> str:
+    inheritance_diagram = graph_ctx.get("inheritance_mermaid", "")
+    call_graph_diagram = graph_ctx.get("call_graph_mermaid", "")
     inherits = graph_ctx.get("inherits") or []
     implements = graph_ctx.get("implements") or []
     uses = graph_ctx.get("uses") or []
     callers = graph_ctx.get("callers") or []
     callees = graph_ctx.get("callees") or []
-    return (
-        "## Graph context\n\n"
-        "### Inheritance\n\n"
+
+    parts = ["## Graph context\n"]
+    # Visual structure first (auditors scan diagrams before lists).
+    if inheritance_diagram:
+        parts.append(
+            f"\n### Inheritance diagram\n\n{inheritance_diagram}"
+        )
+    if call_graph_diagram:
+        parts.append(f"\n### Call graph\n\n{call_graph_diagram}")
+    parts.append(
+        "\n### Inheritance\n\n"
         f"{_render_link_list(inherits, '_No inheritance edges._')}\n"
         "### Implements\n\n"
         f"{_render_link_list(implements, '_Implements nothing._')}\n"
@@ -157,6 +171,7 @@ def _render_graph_context(graph_ctx: dict[str, Any]) -> str:
         "### Callees\n\n"
         f"{_render_link_list(callees, '_No callees in this graph._')}"
     )
+    return "".join(parts)
 
 
 def _render_state(node: dict[str, Any]) -> str:
@@ -295,22 +310,64 @@ def render_node_note(
     return frontmatter, "\n".join(sections)
 
 
+def _pick_primary_method(
+    graph_id: str,
+    container_node_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str | None:
+    """Highest-CC method belonging to `container_node_id`, tiebreak
+    by name ascending. Returns None if the container has no methods.
+
+    "Belonging to" = method ID starts with `container.` (Trailmark's
+    `module:Contract.method` format). Could be re-implemented via
+    `contains` edges if the ID format ever changes — for now
+    ID-prefix is the simplest version-tolerant approach.
+    """
+    methods = [
+        n
+        for n in list_nodes(graph_id, kind="method", cache_root=cache_root)
+        if n["id"].startswith(container_node_id + ".")
+    ]
+    if not methods:
+        return None
+    methods.sort(
+        key=lambda m: (-(m.get("cyclomatic_complexity") or 0), m["name"])
+    )
+    return methods[0]["id"]
+
+
 def render_and_write_node_note(
     vault_path: str | Path,
+    graph_id: str,
     node: dict[str, Any],
     graph_ctx: dict[str, Any] | None = None,
     body: str = "",
+    *,
+    cache_root: Path = CACHE_ROOT,
 ) -> str:
     """Render canonical note + write to vault in one atomic call.
 
     Picks rel_path automatically from `node["kind"]` via
-    `KIND_TO_FOLDER`. Returns the absolute file path as a string
-    (LLM-friendly — tool returns are easier to handle when they're
-    primitives, not Path objects).
+    `KIND_TO_FOLDER`. Computes Mermaid diagrams deterministically
+    (inheritance always; call graph if a primary method exists)
+    and embeds them in the "Graph context" section. Returns the
+    absolute file path as a string (LLM-friendly — tool returns are
+    easier to handle when they're primitives, not Path objects).
 
     Use this from agents instead of calling `render_node_note` +
     `write_obsidian_note` separately. It guarantees every note uses
-    the canonical 7-section template.
+    the canonical 7-section template AND ships with diagrams.
+
+    `graph_id` is the 12-hex repo identifier (the same one the
+    agent already receives in its task message). Diagrams compute
+    from it without agent involvement — the LLM never sees or
+    forwards them.
+
+    Diagram computation failures are logged and skipped rather than
+    raised: the note is the primary artifact, diagrams are
+    enrichment. A note still ships if (e.g.) the graph cache is
+    missing or the node was constructed for a routing test.
 
     Raises `ValueError` if `node["kind"] == "method"` — methods are
     documented inside their parent's note, not as standalone files.
@@ -322,9 +379,33 @@ def render_and_write_node_note(
             f"note, not as standalone files "
             f"(got node_id={node['id']!r})"
         )
+
+    ctx = dict(graph_ctx) if graph_ctx else {}
+
+    # Diagrams are enrichment — never block note writing if they
+    # fail (bad graph_id, test-synthesized node, etc.).
+    try:
+        ctx["inheritance_mermaid"] = render_inheritance(
+            graph_id, node["id"], cache_root=cache_root
+        )
+        primary = _pick_primary_method(
+            graph_id, node["id"], cache_root=cache_root
+        )
+        if primary is not None:
+            ctx["call_graph_mermaid"] = render_call_graph(
+                graph_id, primary, cache_root=cache_root
+            )
+    except Exception as e:
+        _log.warning(
+            "diagram computation failed for %s: %s — proceeding "
+            "without diagrams",
+            node["id"],
+            e,
+        )
+
     folder = KIND_TO_FOLDER.get(kind, "contracts")
     rel_path = f"{folder}/{node['name']}.md"
-    frontmatter, body_text = render_node_note(node, graph_ctx, body)
+    frontmatter, body_text = render_node_note(node, ctx, body)
     written = write_obsidian_note(
         vault_path, rel_path, frontmatter, body_text
     )

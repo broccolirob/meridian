@@ -99,8 +99,13 @@ def test_method_node_renders_too(transfer_method):
 # --- render_and_write_node_note (the agent's keystone tool) ---------
 
 
-def test_render_and_write_returns_string_path(erc20_contract, tmp_path):
-    out = render_and_write_node_note(tmp_path, erc20_contract, {}, "ov")
+def test_render_and_write_returns_string_path(
+    erc20_contract, tier0_graph_id, tmp_path
+):
+    gid, cache_root = tier0_graph_id
+    out = render_and_write_node_note(
+        tmp_path, gid, erc20_contract, {}, "ov", cache_root=cache_root
+    )
     assert isinstance(out, str), "agents expect a string path, not Path"
     assert out.endswith("/contracts/ERC20.md")
 
@@ -142,22 +147,36 @@ def test_render_and_write_routes_by_kind(
         "branches": [],
         "docstring": None,
     }
-    out = render_and_write_node_note(tmp_path, fake_node, {}, "ov")
+    # gid is fake — diagram computation will fail (no such graph
+    # in any cache), but render_and_write_node_note logs and
+    # proceeds, so the routing assertion still holds.
+    out = render_and_write_node_note(
+        tmp_path, "abc012345678", fake_node, {}, "ov"
+    )
     assert out.endswith(f"/{expected_subdir}/{name}.md")
     assert (tmp_path / expected_subdir / f"{name}.md").exists()
 
 
-def test_render_and_write_rejects_method_nodes(transfer_method, tmp_path):
+def test_render_and_write_rejects_method_nodes(
+    transfer_method, tier0_graph_id, tmp_path
+):
+    gid, cache_root = tier0_graph_id
     with pytest.raises(ValueError, match="method nodes are documented"):
-        render_and_write_node_note(tmp_path, transfer_method, {}, "ov")
+        render_and_write_node_note(
+            tmp_path, gid, transfer_method, {}, "ov",
+            cache_root=cache_root,
+        )
     # And nothing was written
     assert not any(tmp_path.rglob("*.md"))
 
 
 def test_render_and_write_produces_canonical_template(
-    erc20_contract, tmp_path
+    erc20_contract, tier0_graph_id, tmp_path
 ):
-    out = render_and_write_node_note(tmp_path, erc20_contract, {}, "ov")
+    gid, cache_root = tier0_graph_id
+    out = render_and_write_node_note(
+        tmp_path, gid, erc20_contract, {}, "ov", cache_root=cache_root
+    )
     text = Path(out).read_text(encoding="utf-8")
     # Frontmatter is canonical (not LLM-invented title/path keys)
     assert text.startswith("---\nname: ERC20\nkind: contract\n")
@@ -172,3 +191,54 @@ def test_render_and_write_produces_canonical_template(
         "## Risks",
     ):
         assert heading in text, f"missing {heading}"
+
+
+# --- diagram embedding (chunk 3.5) -----------------------------------
+
+
+def test_render_and_write_embeds_inheritance_diagram(
+    erc20_contract, tier0_graph_id, tmp_path
+):
+    """Every contract note must include an inheritance diagram —
+    render_inheritance always produces something (at least a
+    `class <Name>` block) so this is guaranteed."""
+    gid, cache_root = tier0_graph_id
+    out_path = render_and_write_node_note(
+        tmp_path, gid, erc20_contract, {}, "ov", cache_root=cache_root
+    )
+    text = Path(out_path).read_text()
+    assert "### Inheritance diagram" in text
+    assert "```mermaid" in text
+    assert "classDiagram" in text
+
+
+def test_render_and_write_embeds_call_graph_when_methods_exist(
+    erc20_contract, tier0_graph_id, tmp_path
+):
+    """ERC20 has methods → call graph appears, centered on the
+    highest-CC method via _pick_primary_method."""
+    gid, cache_root = tier0_graph_id
+    out_path = render_and_write_node_note(
+        tmp_path, gid, erc20_contract, {}, "ov", cache_root=cache_root
+    )
+    text = Path(out_path).read_text()
+    assert "### Call graph" in text
+    assert "graph TD" in text
+    # Exactly two fenced mermaid blocks (inheritance + call graph).
+    assert text.count("```mermaid") == 2
+
+
+def test_diagrams_appear_above_link_lists(
+    erc20_contract, tier0_graph_id, tmp_path
+):
+    """Visual structure (diagrams) before text lists. Auditors
+    scan diagrams first; the lists are the index."""
+    gid, cache_root = tier0_graph_id
+    out_path = render_and_write_node_note(
+        tmp_path, gid, erc20_contract, {}, "ov", cache_root=cache_root
+    )
+    text = Path(out_path).read_text()
+    inheritance_diag_pos = text.find("### Inheritance diagram")
+    inherits_list_pos = text.find("### Inheritance\n")
+    call_graph_pos = text.find("### Call graph")
+    assert inheritance_diag_pos < call_graph_pos < inherits_list_pos

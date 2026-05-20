@@ -4,6 +4,7 @@ import os
 import pickle
 import threading
 import time as _time
+import weakref
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -183,16 +184,35 @@ KIND_TO_FOLDER: dict[str, str] = {
 }
 
 
+# Per-engine collision map cache. Keyed by engine instance via
+# WeakKeyDictionary — when load_graph's lru_cache evicts the
+# engine and it's GC'd, the entry auto-removes. No manual
+# invalidation needed.
+#
+# Module-level rather than attached as `engine._washable_collision_map`
+# because instance attributes survive pickle round-trips —
+# save_graph pickles the engine AS-IS, and the next load_graph
+# would reconstitute an engine carrying a STALE map. Today's
+# annotate/clear_annotations don't add/remove nodes so the
+# pickled map would still be valid, but Phase 4's augment_sarif
+# WILL add finding nodes via save_graph. Storing the map outside
+# the engine guarantees pickle stays clean and the post-save
+# load gets a fresh build with the new nodes included.
+_COLLISION_MAPS: weakref.WeakKeyDictionary[
+    QueryEngine, dict[tuple[str, str], set[str]]
+] = weakref.WeakKeyDictionary()
+
+
 def _build_collision_map(
     engine: QueryEngine,
 ) -> dict[tuple[str, str], set[str]]:
     """Map (folder, bare_name) → set of node IDs routing there.
 
-    Computed once per engine instance and lazy-attached by
-    `_disambiguated_path`. Nodes whose kind has no
-    `KIND_TO_FOLDER` entry (e.g. `method`, documented inside its
-    parent's note) are skipped — they don't get their own files
-    and can't collide on filename.
+    Computed once per engine instance and cached in module-level
+    `_COLLISION_MAPS` by `_disambiguated_path`. Nodes whose kind
+    has no `KIND_TO_FOLDER` entry (e.g. `method`, documented
+    inside its parent's note) are skipped — they don't get their
+    own files and can't collide on filename.
     """
     data = json.loads(engine.to_json())
     collision_map: dict[tuple[str, str], set[str]] = {}
@@ -225,23 +245,25 @@ def _disambiguated_path(
     sync — wikilinks always point at whatever filename the writer
     picks.
 
-    Performance: lazy-attaches a collision map to the cached
-    engine instance returned by `load_graph`. The map is built
-    once on first use and reused for every subsequent resolve on
-    the same engine. `save_graph`'s `cache_clear()` evicts the
-    engine, so the next `load_graph` returns a fresh instance
-    without the attribute → the map gets rebuilt. No separate
-    invalidation needed.
+    Performance: caches the collision map in
+    `_COLLISION_MAPS[engine]` (module-level WeakKeyDictionary).
+    Built once per engine instance, reused for every subsequent
+    resolve on the same engine. When `save_graph` evicts the
+    engine via `cache_clear()` and GC frees it, the WeakKeyDict
+    entry auto-removes; the next `load_graph` returns a fresh
+    pickled engine that builds a fresh map. No state survives
+    the save/load round-trip — safe for any future mutator that
+    adds or removes nodes.
     """
     kind = node["kind"]
     folder = KIND_TO_FOLDER.get(kind, "contracts")
     bare = node["name"]
 
     engine = load_graph(graph_id, cache_root=cache_root)
-    collision_map = getattr(engine, "_washable_collision_map", None)
+    collision_map = _COLLISION_MAPS.get(engine)
     if collision_map is None:
         collision_map = _build_collision_map(engine)
-        setattr(engine, "_washable_collision_map", collision_map)
+        _COLLISION_MAPS[engine] = collision_map
 
     others = collision_map.get((folder, bare), set()) - {node["id"]}
     if not others:

@@ -211,7 +211,7 @@ def test_invoke_one_validates_node_id():
     ]
     for bad in bad_ids:
         with pytest.raises(ValueError, match="invalid node_id"):
-            _invoke_one(fake_agent, "abc012345678", bad, "/v")
+            _invoke_one(fake_agent, "abc012345678", bad)
 
 
 def test_invoke_one_accepts_real_trailmark_ids():
@@ -548,7 +548,7 @@ def test_invoke_one_validates_graph_id():
     ]
     for bad in bad_ids:
         with pytest.raises(ValueError, match="invalid graph_id"):
-            _invoke_one(fake_agent, bad, "src.X:X", "/v")
+            _invoke_one(fake_agent, bad, "src.X:X")
 
 
 def test_invoke_one_accepts_valid_graph_id():

@@ -520,7 +520,6 @@ def _invoke_one(
     agent: Any,
     graph_id: str,
     node_id: str,
-    vault_path: str,
     task_template: str = _NODE_DOC_TEMPLATE,
 ) -> dict[str, Any]:
     """Single agent invocation. Validates `node_id` and
@@ -530,6 +529,11 @@ def _invoke_one(
 
     `task_template` defaults to the NodeDocumenter prompt;
     pass `_FLOW_TRACE_TEMPLATE` for the FlowTracer dispatch.
+
+    vault_path is intentionally NOT a parameter: it's already
+    baked into `agent` via build_agent's system prompt and the
+    _wrap_subagent_writers closures. The dispatcher binds vault
+    once at agent construction; per-invoke routing isn't needed.
     """
     _validate_node_id(node_id)
     # graph_id is interpolated into the task template, so it's
@@ -777,7 +781,7 @@ def dispatch_topo(
     for level in levels:
         _run_pool(
             level,
-            lambda nid: _invoke_one(agent, graph_id, nid, vault_path),
+            lambda nid: _invoke_one(agent, graph_id, nid),
             concurrency_cap=concurrency_cap,
             per_invoke_timeout=per_invoke_timeout,
             on_done=record,
@@ -884,7 +888,7 @@ def dispatch_flows(
     _run_pool(
         order,
         lambda eid: _invoke_one(
-            agent, graph_id, eid, vault_path, _FLOW_TRACE_TEMPLATE
+            agent, graph_id, eid, _FLOW_TRACE_TEMPLATE
         ),
         concurrency_cap=concurrency_cap,
         per_invoke_timeout=per_invoke_timeout,

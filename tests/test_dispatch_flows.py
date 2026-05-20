@@ -202,7 +202,6 @@ def test_invoke_one_validates_entrypoint_id_via_flow_template():
                 fake_agent,
                 "abc012345678",
                 bad,
-                "/v",
                 _FLOW_TRACE_TEMPLATE,
             )
 

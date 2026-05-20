@@ -171,9 +171,10 @@ def test_disambiguation_uses_per_engine_collision_map(
 ):
     """Two different engines (different graph_ids → different
     cached instances) get distinct collision maps. Proves the
-    lazy-attach is per-instance, not smuggled across engines
-    via module-global state."""
+    cache is per-instance, not smuggled across engines via
+    module-global state."""
     from src.graph.persist import load_graph
+    from src.render.obsidian import _COLLISION_MAPS
 
     gid0, root0 = tier0_graph_id
     gid1, root1 = tier1_graph_id
@@ -189,8 +190,8 @@ def test_disambiguation_uses_per_engine_collision_map(
         cache_root=root1,
     )
 
-    m0 = getattr(e0, "_washable_collision_map", None)
-    m1 = getattr(e1, "_washable_collision_map", None)
+    m0 = _COLLISION_MAPS.get(e0)
+    m1 = _COLLISION_MAPS.get(e1)
     assert m0 is not None and m1 is not None
     assert m0 is not m1, (
         "each engine instance must own its own collision "
@@ -200,3 +201,66 @@ def test_disambiguation_uses_per_engine_collision_map(
     # Tier 0 (ERC4626) has no UniswapV2Pair; Tier 1 does.
     assert ("contracts", "UniswapV2Pair") in m1
     assert ("contracts", "UniswapV2Pair") not in m0
+
+
+def test_disambiguation_map_does_not_survive_save_load(
+    tier1_graph_id,
+):
+    """Phase 4 risk armor: the collision map cache must NOT
+    survive a save/load round-trip via pickle. Otherwise a
+    future mutator that adds nodes (e.g. slither's
+    augment_sarif emitting finding nodes) would save with a
+    stale map missing the new nodes; the next load_graph
+    would return an engine carrying that stale map and
+    mis-disambiguate the new nodes' wikilink filenames.
+
+    Verified by: prime the cache for e1, save_graph (which
+    forces _load_graph_cached.cache_clear), reload e2 as a
+    fresh pickled instance, assert e2 has NO entry in the
+    module-level _COLLISION_MAPS until something resolves
+    against it."""
+    from src.graph.persist import load_graph, save_graph
+    from src.render.obsidian import _COLLISION_MAPS
+
+    gid, cache_root = tier1_graph_id
+    e1 = load_graph(gid, cache_root=cache_root)
+    resolve_wikilink(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair",
+        cache_root=cache_root,
+    )
+    assert e1 in _COLLISION_MAPS, (
+        "test setup: e1 should have a cached map after the "
+        "priming resolve_wikilink"
+    )
+
+    # save_graph triggers cache_clear → next load_graph
+    # returns a fresh pickled instance.
+    save_graph(e1, gid, cache_root=cache_root)
+    e2 = load_graph(gid, cache_root=cache_root)
+    assert e2 is not e1, (
+        "save_graph's cache_clear should have evicted e1; "
+        "this assertion validates the test's premise — if "
+        "it fails, the test isn't really exercising the "
+        "save/load round-trip"
+    )
+
+    # The Phase 4 armor: the fresh pickled engine must have
+    # NO entry yet. If a stale map smuggled through pickle,
+    # e2 would already have one and new-node disambiguation
+    # would silently use the stale data.
+    assert e2 not in _COLLISION_MAPS, (
+        "fresh pickled engine should NOT carry a stale "
+        "collision map — pickle must stay clean so the next "
+        "resolve builds a map that includes any newly-added "
+        "nodes (Phase 4: slither finding nodes via "
+        "augment_sarif)"
+    )
+
+    # Sanity: resolve still works on e2 — builds fresh map.
+    resolve_wikilink(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair",
+        cache_root=cache_root,
+    )
+    assert e2 in _COLLISION_MAPS

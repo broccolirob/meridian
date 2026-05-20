@@ -20,8 +20,10 @@ Three public entry points:
   entrypoint in a flat parallel pool (no ordering constraint).
 """
 
+import concurrent.futures
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +38,17 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_CONCURRENCY_CAP = 5
+# Per-invocation timeout (seconds) for one agent.invoke() call.
+# Chunk 3.11 closes the chunk 3.5 hang: gpt-5-mini calls typically
+# take 5-15s; 600s is the deadline beyond which we declare the
+# call hung and move on.
+DEFAULT_PER_INVOKE_TIMEOUT = 600.0
+# ChatOpenAI's HTTP request_timeout is set slightly below the
+# orchestrator's per_invoke_timeout so HTTP fails first, the
+# worker raises cleanly, and the future completes via the
+# existing failure path. The orchestrator timeout is the backup
+# for true indefinite hangs (langchain deadlock, etc).
+_REQUEST_TIMEOUT_BUFFER = 60.0
 
 
 def _build_system_prompt(graph_id: str, vault_path: str | Path) -> str:
@@ -105,12 +118,17 @@ def build_agent(
     vault_path: str | Path,
     *,
     model: str = DEFAULT_MODEL,
+    request_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT - _REQUEST_TIMEOUT_BUFFER,
 ) -> Any:
     """Build the washable main agent.
 
     `graph_id` is the 12-hex graph identifier from `trailmark_parse`.
     `vault_path` should be an absolute path (callers typically use
     `Path(vault).resolve()` so the LLM sees an unambiguous string).
+    `request_timeout` (seconds) sets ChatOpenAI's per-HTTP-request
+    timeout — slightly below the orchestrator's per-invoke timeout
+    so HTTP fails first and worker threads exit cleanly. Set to
+    None to disable (NOT recommended — see chunk 3.5 hang).
 
     Returns a langgraph `CompiledStateGraph` ready for `.invoke()`.
     The agent is wired with BOTH subagents (NodeDocumenter +
@@ -120,7 +138,12 @@ def build_agent(
     entrypoint …" → FlowTracer). Python drivers (`dispatch_topo`
     and `dispatch_flows`) handle the enumeration loop.
     """
-    llm = ChatOpenAI(model=model)
+    # mypy doesn't see pydantic dynamic fields on ChatOpenAI;
+    # `request_timeout` is in model_fields (confirmed via probe).
+    llm = ChatOpenAI(
+        model=model,
+        request_timeout=request_timeout,  # type: ignore[call-arg]
+    )
     return create_deep_agent(
         model=llm,
         subagents=[NODE_DOCUMENTER_SUBAGENT, FLOW_TRACER_SUBAGENT],
@@ -130,6 +153,62 @@ def build_agent(
             topo_order,
         ],
     )
+
+
+def _gather_with_per_invoke_timeout(
+    futures_map: dict[concurrent.futures.Future, str],
+    *,
+    per_invoke_timeout: float,
+    on_done: Callable[[str, str, Any], None],
+) -> None:
+    """Drain `futures_map` with a per-future deadline.
+
+    For each future:
+      - completes within `per_invoke_timeout`: invokes
+        `on_done(node_id, status, info)` with the result.
+      - exceeds the deadline: invokes
+        `on_done(node_id, "fail", "TimeoutError: …")` and calls
+        `future.cancel()` (best-effort — Python can't kill a
+        running thread; daemon workers die when the process
+        exits).
+
+    Polls with `concurrent.futures.wait` so completed futures are
+    drained promptly, and hung futures are detected within
+    poll-interval seconds of crossing their deadline.
+    """
+    pending = set(futures_map.keys())
+    start_times: dict[concurrent.futures.Future, float] = {
+        f: time.monotonic() for f in pending
+    }
+    poll_interval = min(2.0, max(0.05, per_invoke_timeout / 4))
+
+    while pending:
+        done, _still_pending = concurrent.futures.wait(
+            pending,
+            timeout=poll_interval,
+            return_when=concurrent.futures.FIRST_COMPLETED,
+        )
+        for future in done:
+            nid = futures_map[future]
+            try:
+                status, info = future.result(timeout=0)
+                on_done(nid, status, info)
+            except Exception as e:
+                on_done(nid, "fail", f"{type(e).__name__}: {e}")
+            pending.discard(future)
+
+        now = time.monotonic()
+        for future in list(pending):
+            if now - start_times[future] > per_invoke_timeout:
+                nid = futures_map[future]
+                on_done(
+                    nid,
+                    "fail",
+                    f"TimeoutError: invocation exceeded "
+                    f"per_invoke_timeout={per_invoke_timeout}s",
+                )
+                future.cancel()
+                pending.discard(future)
 
 
 def _invoke_one(
@@ -157,6 +236,7 @@ def dispatch_topo(
     model: str = DEFAULT_MODEL,
     concurrency_cap: int = DEFAULT_CONCURRENCY_CAP,
     on_progress: Callable[[int, int, str], None] | None = None,
+    per_invoke_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT,
 ) -> dict[str, Any]:
     """Walk the topological order for `graph_id` and dispatch
     NodeDocumenter per node. Returns a summary of what shipped.
@@ -165,6 +245,12 @@ def dispatch_topo(
     parallel agent invocations via a ThreadPoolExecutor — the
     lost-update race in `annotate` is handled by the threading.Lock
     in `src/tools.py`.
+
+    `per_invoke_timeout` (seconds) bounds each NodeDocumenter
+    invocation. Hung invocations are recorded as TimeoutError
+    failures after the deadline; the dispatch continues. Default
+    600s = 10 minutes (the chunk 3.5 production hang motivating
+    this was 17 minutes of indefinite block).
 
     Per-node exceptions are caught and recorded in `failures`; the
     loop never aborts mid-walk.
@@ -193,6 +279,11 @@ def dispatch_topo(
         raise ValueError(
             f"concurrency_cap must be >= 1 (got {concurrency_cap})"
         )
+    if per_invoke_timeout <= 0:
+        raise ValueError(
+            f"per_invoke_timeout must be > 0 "
+            f"(got {per_invoke_timeout})"
+        )
 
     # One agent shared across all worker threads. Safe because
     # langgraph's CompiledStateGraph keeps no mutable instance state
@@ -200,7 +291,12 @@ def dispatch_topo(
     # dict, and the underlying ChatOpenAI client is stateless.
     # Empirically verified at cap=5 on Tier 0 (8 nodes) and Tier 1
     # (22 nodes) without state corruption.
-    agent = build_agent(graph_id, vault_path, model=model)
+    agent = build_agent(
+        graph_id,
+        vault_path,
+        model=model,
+        request_timeout=per_invoke_timeout - _REQUEST_TIMEOUT_BUFFER,
+    )
     levels = topo_levels(graph_id)
     order = [nid for level in levels for nid in level]
 
@@ -215,25 +311,40 @@ def dispatch_topo(
             _log.exception("dispatch failed for %s", node_id)
             return ("fail", f"{type(e).__name__}: {e}")
 
+    def _record(nid: str, status: str, info: Any) -> None:
+        nonlocal progress_idx
+        progress_idx += 1
+        if on_progress is not None:
+            on_progress(progress_idx, len(order), nid)
+        if status == "ok":
+            successes.append(info)
+        else:
+            failures.append({"node_id": nid, "error": info})
+
     # Dispatch one level at a time. Within a level, all nodes are
     # independent (verified by topo_levels); they run in parallel up
     # to concurrency_cap. Across levels, we wait for the level to
     # finish before starting the next — that's what guarantees a
     # derived contract's wikilink targets exist on disk by the time
     # the derived contract's NodeDocumenter runs.
+    #
+    # Pool uses explicit shutdown(wait=False, cancel_futures=True)
+    # instead of context manager because the `with` form blocks on
+    # hung workers (chunk 3.5 hang). Hung workers are daemon
+    # threads and die when the process exits.
     for level in levels:
-        with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
-            futures = {pool.submit(_try_one, nid): nid for nid in level}
-            for future in as_completed(futures):
-                node_id = futures[future]
-                status, info = future.result()
-                progress_idx += 1
-                if on_progress is not None:
-                    on_progress(progress_idx, len(order), node_id)
-                if status == "ok":
-                    successes.append(info)
-                else:
-                    failures.append({"node_id": node_id, "error": info})
+        pool = ThreadPoolExecutor(max_workers=concurrency_cap)
+        try:
+            futures_map = {
+                pool.submit(_try_one, nid): nid for nid in level
+            }
+            _gather_with_per_invoke_timeout(
+                futures_map,
+                per_invoke_timeout=per_invoke_timeout,
+                on_done=_record,
+            )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     return {
         "graph_id": graph_id,
@@ -270,6 +381,7 @@ def dispatch_flows(
     concurrency_cap: int = DEFAULT_CONCURRENCY_CAP,
     on_progress: Callable[[int, int, str], None] | None = None,
     skip_leaf_entrypoints: bool = True,
+    per_invoke_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT,
 ) -> dict[str, Any]:
     """Enumerate entrypoints via `attack_surface` and dispatch
     FlowTracer per entrypoint. Returns a summary of what shipped.
@@ -278,6 +390,12 @@ def dispatch_flows(
     with no outgoing callees (leaf functions like simple getters).
     Tracing them produces an empty-paths placeholder note —
     wasteful at scale.
+
+    `per_invoke_timeout` (seconds) bounds each FlowTracer
+    invocation. Hung invocations are recorded as TimeoutError
+    failures after the deadline; the dispatch continues. See
+    `dispatch_topo` for the rationale (chunk 3.11 / chunk 3.5
+    hang).
 
     Per-entrypoint exceptions are caught and recorded in `failures`;
     the loop never aborts mid-walk. Mirrors `dispatch_topo`'s shape
@@ -300,6 +418,11 @@ def dispatch_flows(
         raise ValueError(
             f"concurrency_cap must be >= 1 (got {concurrency_cap})"
         )
+    if per_invoke_timeout <= 0:
+        raise ValueError(
+            f"per_invoke_timeout must be > 0 "
+            f"(got {per_invoke_timeout})"
+        )
 
     entrypoints = attack_surface(graph_id)
     if skip_leaf_entrypoints:
@@ -309,9 +432,15 @@ def dispatch_flows(
         ]
     order = [e["node_id"] for e in entrypoints]
 
-    agent = build_agent(graph_id, vault_path, model=model)
+    agent = build_agent(
+        graph_id,
+        vault_path,
+        model=model,
+        request_timeout=per_invoke_timeout - _REQUEST_TIMEOUT_BUFFER,
+    )
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    progress_idx = 0
 
     def _try_one(eid: str) -> tuple[str, Any]:
         try:
@@ -323,21 +452,30 @@ def dispatch_flows(
             _log.exception("flow dispatch failed for %s", eid)
             return ("fail", f"{type(e).__name__}: {e}")
 
+    def _record(eid: str, status: str, info: Any) -> None:
+        nonlocal progress_idx
+        progress_idx += 1
+        if on_progress is not None:
+            on_progress(progress_idx, len(order), eid)
+        if status == "ok":
+            successes.append(info)
+        else:
+            failures.append({"node_id": eid, "error": info})
+
     # Entrypoints are independent — flat parallel pool, no
     # level-gating (unlike dispatch_topo's inheritance-aware walk).
-    progress_idx = 0
-    with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
-        futures = {pool.submit(_try_one, eid): eid for eid in order}
-        for future in as_completed(futures):
-            eid = futures[future]
-            status, info = future.result()
-            progress_idx += 1
-            if on_progress is not None:
-                on_progress(progress_idx, len(order), eid)
-            if status == "ok":
-                successes.append(info)
-            else:
-                failures.append({"node_id": eid, "error": info})
+    # See dispatch_topo for the rationale on explicit
+    # shutdown(wait=False, cancel_futures=True) vs context manager.
+    pool = ThreadPoolExecutor(max_workers=concurrency_cap)
+    try:
+        futures_map = {pool.submit(_try_one, eid): eid for eid in order}
+        _gather_with_per_invoke_timeout(
+            futures_map,
+            per_invoke_timeout=per_invoke_timeout,
+            on_done=_record,
+        )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     return {
         "graph_id": graph_id,

@@ -107,3 +107,77 @@ def test_dispatch_order_field_matches_topo_order(
     result = dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
 
     assert result["order"] == expected
+
+
+# --- per-invocation timeout (chunk 3.11) -----------------------------
+
+
+class _HangingAgent:
+    """Stand-in agent whose invoke() blocks on an event forever.
+
+    Use to simulate the chunk 3.5 hang pattern in tests without
+    real LLM calls."""
+
+    def __init__(self, block_signal: threading.Event):
+        self._lock = threading.Lock()
+        self.calls = 0
+        self._block = block_signal
+
+    def invoke(self, inputs):
+        with self._lock:
+            self.calls += 1
+        self._block.wait()  # hang until released (or never)
+        raise AssertionError("unreachable")
+
+
+def test_dispatch_per_invoke_timeout_records_failure(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    """A hung LLM call must NOT block the orchestrator. After
+    per_invoke_timeout seconds the future is recorded as a
+    failure and dispatch_topo returns. Pre-3.11 this would hang
+    forever (chunk 3.5 pattern reproducible here)."""
+    gid = tier0_graph_id_default_cache
+    block = threading.Event()  # never set during test
+    hanging = _HangingAgent(block)
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: hanging
+    )
+
+    try:
+        result = dispatch_topo(
+            gid,
+            "/tmp/fake-vault",
+            concurrency_cap=2,
+            per_invoke_timeout=0.3,
+        )
+
+        # All 8 Tier 0 nodes recorded as timeout failures.
+        assert result["node_count"] == 8
+        assert len(result["successes"]) == 0
+        assert len(result["failures"]) == 8
+        for fail in result["failures"]:
+            assert "TimeoutError" in fail["error"]
+            assert "per_invoke_timeout" in fail["error"]
+        # Workers ran (got past the lock).
+        assert hanging.calls >= 2
+    finally:
+        # Release daemon workers belt-and-suspenders.
+        block.set()
+
+
+def test_dispatch_rejects_zero_or_negative_per_invoke_timeout(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    gid = tier0_graph_id_default_cache
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: _FakeAgent()
+    )
+    for bad in (0, -1, -0.5):
+        with pytest.raises(ValueError, match="per_invoke_timeout"):
+            dispatch_topo(
+                gid,
+                "/tmp/fake-vault",
+                concurrency_cap=1,
+                per_invoke_timeout=bad,
+            )

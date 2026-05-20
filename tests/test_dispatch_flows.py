@@ -114,3 +114,72 @@ def test_dispatch_flows_rejects_zero_or_negative_cap(
             dispatch_flows(
                 gid, "/tmp/fake-vault", concurrency_cap=bad
             )
+
+
+# --- per-invocation timeout (chunk 3.11) -----------------------------
+
+
+class _HangingAgent:
+    """Same pattern as test_dispatch._HangingAgent — agent
+    whose invoke() blocks forever to simulate the chunk 3.5 hang."""
+
+    def __init__(self, block_signal: threading.Event):
+        self._lock = threading.Lock()
+        self.calls = 0
+        self._block = block_signal
+
+    def invoke(self, inputs):
+        with self._lock:
+            self.calls += 1
+        self._block.wait()
+        raise AssertionError("unreachable")
+
+
+def test_dispatch_flows_per_invoke_timeout_records_failure(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    """Same as dispatch_topo's timeout test — hung agent.invoke()
+    must be recorded as a timeout failure after per_invoke_timeout
+    seconds. Mirrors the chunk 3.5 hang pattern at the flows
+    dispatch level."""
+    gid = tier0_graph_id_default_cache
+    block = threading.Event()
+    hanging = _HangingAgent(block)
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: hanging
+    )
+
+    try:
+        result = dispatch_flows(
+            gid,
+            "/tmp/fake-vault",
+            concurrency_cap=2,
+            per_invoke_timeout=0.3,
+        )
+        # Tier 0 leaf-filtered: 12 entrypoints, all timeout.
+        assert result["entrypoint_count"] == 12
+        assert len(result["successes"]) == 0
+        assert len(result["failures"]) == 12
+        for fail in result["failures"]:
+            assert "TimeoutError" in fail["error"]
+            assert "per_invoke_timeout" in fail["error"]
+        assert hanging.calls >= 2
+    finally:
+        block.set()
+
+
+def test_dispatch_flows_rejects_zero_or_negative_per_invoke_timeout(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    gid = tier0_graph_id_default_cache
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: _FakeAgent()
+    )
+    for bad in (0, -1, -0.5):
+        with pytest.raises(ValueError, match="per_invoke_timeout"):
+            dispatch_flows(
+                gid,
+                "/tmp/fake-vault",
+                concurrency_cap=1,
+                per_invoke_timeout=bad,
+            )

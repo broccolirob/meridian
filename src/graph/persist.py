@@ -47,6 +47,50 @@ def repo_hash(repo_path: str | Path) -> str:
     return hashlib.sha256(abs_path.encode()).hexdigest()[:12]
 
 
+def save_parse_root(
+    parse_root: str | Path,
+    graph_id: str,
+    cache_root: Path = CACHE_ROOT,
+) -> Path:
+    """Persist the absolute `parse_root` alongside the engine.
+
+    Chunk 3.26 / I-NEW-7: `read_node_source` validates that
+    file paths it reads are under this root, defending against
+    symlinked exfiltration (e.g., an adversarial repo planting
+    `evil.sol -> /etc/passwd`).
+
+    The file is written to `cache_root/<gid>/parse_root.txt`
+    so it's co-located with `engine.pkl` and gets invalidated
+    on cache wipe.
+    """
+    _validate_graph_id(graph_id)
+    out_dir = Path(cache_root) / graph_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "parse_root.txt"
+    abs_root = str(Path(parse_root).resolve())
+    out_path.write_text(abs_root + "\n", encoding="utf-8")
+    return out_path
+
+
+def load_parse_root(
+    graph_id: str,
+    cache_root: Path = CACHE_ROOT,
+) -> Path | None:
+    """Return the absolute `parse_root` saved alongside
+    `engine.pkl`, or None if not set (legacy graphs).
+
+    Chunk 3.26 / I-NEW-7: the None return preserves backward-
+    compat — pre-3.26 caches have no parse_root.txt; callers
+    that need the validation should treat None as "skip the
+    check" (current behavior) rather than "reject".
+    """
+    _validate_graph_id(graph_id)
+    parse_root_file = Path(cache_root) / graph_id / "parse_root.txt"
+    if not parse_root_file.exists():
+        return None
+    return Path(parse_root_file.read_text().strip())
+
+
 def save_graph(
     engine: QueryEngine,
     graph_id: str,

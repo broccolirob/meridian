@@ -8,7 +8,14 @@ from langchain_core.tools import InjectedToolArg
 from trailmark.models import AnnotationKind
 from trailmark.query.api import QueryEngine
 
-from src.graph.persist import CACHE_ROOT, load_graph, repo_hash, save_graph
+from src.graph.persist import (
+    CACHE_ROOT,
+    load_graph,
+    load_parse_root,
+    repo_hash,
+    save_graph,
+    save_parse_root,
+)
 
 # Process-level lock for graph-write paths in src/tools.py
 # (chunk 3.25 / I-NEW-6: scope expanded from "annotation writes
@@ -63,13 +70,19 @@ def trailmark_parse(
 
     Chunk 3.25 / I-NEW-6: the save_graph call is serialized
     under `_ANNOTATE_LOCK` so a future flow that runs parse
-    concurrently with annotate can't lose updates. No behavior
-    change for today's one-shot-pre-dispatch usage.
+    concurrently with annotate can't lose updates.
+
+    Chunk 3.26 / I-NEW-7: ALSO writes `parse_root.txt`
+    alongside engine.pkl so `read_node_source` can enforce
+    that file paths it reads are within the parsed directory
+    (defends against symlinked exfiltration via adversarial
+    repos).
     """
     engine = QueryEngine.from_directory(str(repo_path), language=language)
     rh = repo_hash(repo_path)
     with _ANNOTATE_LOCK:
         save_graph(engine, rh, cache_root=cache_root)
+        save_parse_root(repo_path, rh, cache_root=cache_root)
     return rh
 
 
@@ -296,16 +309,41 @@ def read_node_source(
     """Return the source code for `node_id` — its full parsed line
     range, read from the file path Trailmark recorded.
 
-    This is the agent-safe wrapper around `read_file_range`: the
-    agent never names a path, so it can't be prompt-injected into
-    reading `/etc/passwd` or similar via adversarial source comments.
-    The path comes from the parsed graph, which is trusted by
-    construction (we ran `trailmark_parse` over a known directory).
+    Agent-safe wrapper around `read_file_range`. The agent never
+    names a path, so it can't be prompt-injected into reading
+    `/etc/passwd` via tool arguments.
+
+    Chunk 3.26 / I-NEW-7: ALSO validates that the recorded
+    `file_path` is INSIDE the original `parse_root`. Defends
+    against the chunk 3.16 security specialist's symlink-
+    exfiltration finding: Trailmark's source walker follows
+    file-level symlinks, so an adversarial repo can plant
+    `evil.sol -> /etc/passwd` and the parsed graph will record
+    `/etc/passwd` as a node's file_path. This check rejects any
+    path resolving outside parse_root.
+
+    Backward-compat: pre-3.26 caches don't have
+    `parse_root.txt`. `load_parse_root` returns None for those;
+    this function falls back to the pre-3.26 behavior (trust
+    the path) rather than rejecting wholesale.
     """
+    parse_root = load_parse_root(graph_id, cache_root=cache_root)
     node = get_node(graph_id, node_id, cache_root=cache_root)
     loc = node["location"]
+    file_path = Path(loc["file_path"]).resolve()
+    if parse_root is not None:
+        try:
+            file_path.relative_to(parse_root.resolve())
+        except ValueError:
+            raise ValueError(
+                f"read_node_source rejected: file_path "
+                f"{file_path} escapes parse_root {parse_root}. "
+                f"Likely a symlinked file in the parsed repo "
+                f"pointing outside the parse tree — possible "
+                f"exfiltration attempt (chunk 3.26 / I-NEW-7)."
+            ) from None
     return read_file_range(
-        loc["file_path"], loc["start_line"], loc["end_line"]
+        file_path, loc["start_line"], loc["end_line"]
     )
 
 

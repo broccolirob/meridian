@@ -10,6 +10,26 @@ from src.graph.persist import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_load_graph_cache_each_test():
+    """Chunk 3.26 / I-NEW-8: ensure every test in this file
+    starts AND ends with an empty `_load_graph_cached`.
+
+    Pre-3.26 only some tests called
+    `_load_graph_cached.cache_clear()` as setup; none called
+    it as teardown. The lru_cache is module-global, so
+    entries persisted into subsequent tests. Currently
+    harmless because tests use distinct graph_ids, but a
+    future test reusing an existing gid would inherit stale
+    cache state.
+
+    Autouse means this runs around every test in the file
+    without per-test boilerplate."""
+    _load_graph_cached.cache_clear()
+    yield
+    _load_graph_cached.cache_clear()
+
+
 def test_repo_hash_stable_and_unique():
     h1 = repo_hash("/tmp/foo")
     h2 = repo_hash("/tmp/foo")
@@ -221,3 +241,24 @@ def test_concurrent_load_graph_returns_same_instance(
         f"lru_cache doesn't serialize misses; post-fix "
         f"_LOAD_LOCK in src/graph/persist.py serializes them."
     )
+
+
+def test_autouse_fixture_provides_clean_cache_at_test_entry(
+    tier0_graph_id_default_cache,
+):
+    """Chunk 3.26 / I-NEW-8: verify the autouse fixture
+    actually delivers an empty cache to every test. If the
+    fixture broke (e.g., was renamed without the autouse
+    marker), this sentinel test would observe inherited
+    cache state from earlier tests in the same session."""
+    info = _load_graph_cached.cache_info()
+    assert info.currsize == 0, (
+        f"cache should be empty at test entry; got "
+        f"{info.currsize} entries (autouse fixture broken "
+        f"or didn't run)"
+    )
+
+    # Loading populates the cache.
+    load_graph(tier0_graph_id_default_cache)
+    info = _load_graph_cached.cache_info()
+    assert info.currsize >= 1

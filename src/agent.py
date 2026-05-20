@@ -292,27 +292,56 @@ def _gather_with_per_invoke_timeout(
             timeout=poll_interval,
             return_when=concurrent.futures.FIRST_COMPLETED,
         )
+        # Completion branch.
         for future in done:
             nid = futures_map[future]
             try:
-                status, info = future.result(timeout=0)
-                on_done(nid, status, info)
-            except Exception as e:
-                on_done(nid, "fail", f"{type(e).__name__}: {e}")
-            pending.discard(future)
+                # Resolve the worker's outcome first. Worker
+                # exceptions translate to a ("fail", "...")
+                # tuple so we still call on_done with a real
+                # status.
+                try:
+                    status, info = future.result(timeout=0)
+                except Exception as e:
+                    status, info = "fail", f"{type(e).__name__}: {e}"
+                # Then call on_done exactly once. A failure
+                # HERE (e.g., caller-supplied on_progress hit a
+                # broken pipe) is logged and swallowed so the
+                # gather loop drains the rest of pending instead
+                # of abandoning in-flight workers (chunk 3.19,
+                # /review C-NEW-4).
+                try:
+                    on_done(nid, status, info)
+                except Exception:
+                    _log.exception(
+                        "on_done raised for %s; continuing to "
+                        "drain remaining futures",
+                        nid,
+                    )
+            finally:
+                pending.discard(future)
 
+        # Timeout branch.
         now = time.monotonic()
         for future in list(pending):
             if now - start_times[future] > per_invoke_timeout:
                 nid = futures_map[future]
-                on_done(
-                    nid,
-                    "fail",
-                    f"TimeoutError: invocation exceeded "
-                    f"per_invoke_timeout={per_invoke_timeout}s",
-                )
-                future.cancel()
-                pending.discard(future)
+                try:
+                    on_done(
+                        nid,
+                        "fail",
+                        f"TimeoutError: invocation exceeded "
+                        f"per_invoke_timeout={per_invoke_timeout}s",
+                    )
+                except Exception:
+                    _log.exception(
+                        "on_done raised for %s during timeout "
+                        "handling; continuing",
+                        nid,
+                    )
+                finally:
+                    future.cancel()
+                    pending.discard(future)
 
 
 def _validate_node_id(node_id: str) -> None:
@@ -421,12 +450,20 @@ def _make_recorder(
     def _record(item_id: str, status: str, info: Any) -> None:
         nonlocal progress_idx
         progress_idx += 1
-        if on_progress is not None:
-            on_progress(progress_idx, total, item_id)
+        # Record the outcome BEFORE notifying the caller. A
+        # broken on_progress callback (chunk 3.19 / C-NEW-4)
+        # must not lose the outcome tracking — the dispatch's
+        # whole point is to return a complete summary. Notify
+        # second so that even if on_progress raises and the
+        # exception escapes this closure (up to _gather's
+        # try/except), the successes/failures lists are
+        # already populated for this item.
         if status == "ok":
             successes.append(info)
         else:
             failures.append({"node_id": item_id, "error": info})
+        if on_progress is not None:
+            on_progress(progress_idx, total, item_id)
 
     return _record
 

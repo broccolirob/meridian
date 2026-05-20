@@ -232,3 +232,120 @@ def test_invoke_one_accepts_real_trailmark_ids():
     ]
     for nid in real_ids:
         _validate_node_id(nid)  # must not raise
+
+
+# --- broken on_progress / on_done callback resilience (chunk 3.19) ---
+
+
+def test_dispatch_continues_when_on_progress_callback_raises(
+    monkeypatch, tier0_graph_id_default_cache, caplog
+):
+    """Chunk 3.19 /review C-NEW-4: a broken on_progress callback
+    must NOT abort the dispatch run. Pre-3.19 the callback's
+    exception propagated out of `_gather_with_per_invoke_timeout`
+    → out of `_run_pool` → out of `dispatch_topo`, abandoning
+    in-flight workers and dropping every node's failure record.
+    Post-3.19 the gather loop catches on_done exceptions, logs
+    them via _log.exception, and continues to drain.
+
+    Production scenario: a notebook user's progress bar writes
+    to a closed stderr (Jupyter kernel restart, broken pipe);
+    the dispatch must still complete and the user gets the
+    full result summary."""
+    import logging
+
+    gid = tier0_graph_id_default_cache
+    fake = _FakeAgent()
+    monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
+
+    def broken_callback(idx: int, total: int, nid: str) -> None:
+        raise RuntimeError(
+            f"simulated broken pipe for {nid} (idx={idx}/{total})"
+        )
+
+    caplog.set_level(logging.WARNING, logger="src.agent")
+    result = dispatch_topo(
+        gid,
+        "/tmp/fake-vault",
+        concurrency_cap=1,
+        on_progress=broken_callback,
+    )
+
+    # Dispatch completed despite the broken callback — every
+    # node got documented (or attempted), and the summary
+    # came back.
+    assert result["node_count"] == 8
+    assert len(result["successes"]) == 8
+
+    # Every on_done exception was logged with a traceback.
+    on_done_errors = [
+        r
+        for r in caplog.records
+        if "on_done raised" in r.getMessage()
+    ]
+    assert len(on_done_errors) == 8, (
+        f"expected one on_done log per node "
+        f"(got {len(on_done_errors)})"
+    )
+    # Tracebacks captured (caplog records the exception info
+    # for _log.exception calls).
+    assert any(r.exc_info for r in on_done_errors), (
+        "_log.exception should attach exc_info; without it the "
+        "traceback is lost"
+    )
+
+
+def test_gather_logs_and_continues_when_on_done_raises():
+    """Direct unit test of `_gather_with_per_invoke_timeout`:
+    if on_done raises for every future, the gather loop
+    must drain all futures, log each failure, and return —
+    not raise, not hang.
+
+    Pre-3.19 the function aborted with an uncaught exception
+    after the first on_done failure (in the completion
+    branch's recovery path). Post-3.19 every future is
+    drained from pending in `finally` even if on_done blew up."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from src.agent import _gather_with_per_invoke_timeout
+
+    pool = ThreadPoolExecutor(max_workers=3)
+    try:
+
+        def _quick(name: str) -> tuple[str, dict]:
+            return ("ok", {"node_id": name, "agent_reply": f"/{name}.md"})
+
+        f1 = pool.submit(_quick, "n1")
+        f2 = pool.submit(_quick, "n2")
+        f3 = pool.submit(_quick, "n3")
+        futures_map = {f1: "n1", f2: "n2", f3: "n3"}
+
+        called: list[str] = []
+
+        def broken_on_done(nid: str, status: str, info) -> None:
+            called.append(nid)
+            raise RuntimeError(f"simulated callback failure: {nid}")
+
+        start = time.monotonic()
+        # Must NOT raise. The gather function swallows on_done
+        # exceptions and continues.
+        _gather_with_per_invoke_timeout(
+            futures_map,
+            per_invoke_timeout=10.0,
+            on_done=broken_on_done,
+        )
+        elapsed = time.monotonic() - start
+
+        # Loop terminated in bounded time (didn't hang).
+        assert elapsed < 5.0, (
+            f"gather took {elapsed:.1f}s — possible hang or "
+            f"infinite retry loop"
+        )
+        # All three futures were processed exactly once each.
+        assert sorted(called) == ["n1", "n2", "n3"], (
+            f"expected each future's on_done called once; got "
+            f"{called}"
+        )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)

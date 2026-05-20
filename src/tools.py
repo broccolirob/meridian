@@ -300,6 +300,16 @@ def entrypoint_paths_to(
     to `node_id`. Each path is a list of node IDs starting at an
     entrypoint and ending at `node_id`.
 
+    RESERVED for chunk 4.5 (RiskSynthesizer). No subagent's tool
+    allowlist exposes this today — `NODE_DOCUMENTER_SUBAGENT`
+    documents one node, `FLOW_TRACER_SUBAGENT` is dispatched per
+    entrypoint by the main agent (it doesn't need to enumerate
+    paths from OTHER entrypoints). Phase 4's RiskSynthesizer
+    will use this for "show me every entrypoint that reaches
+    this dangerous sink" narratives in `risks/*.md`. Tested in
+    `tests/test_tools_surface.py` so the wrapper contract stays
+    pinned until 4.5 lands.
+
     Returns `[]` if `node_id` is itself an entrypoint — no
     OTHER entrypoint reaches it via call edges (entrypoint-to-
     entrypoint isn't typically what callers want here).
@@ -316,6 +326,15 @@ def complexity_hotspots(
     cache_root: Path = CACHE_ROOT,
 ) -> list[dict[str, Any]]:
     """Methods with `cyclomatic_complexity >= threshold`.
+
+    RESERVED for chunk 4.5 (RiskSynthesizer). Same status as
+    `entrypoint_paths_to` above — no subagent's tool allowlist
+    has it today. Phase 4's RiskSynthesizer will use this to
+    populate `risks/hotspots.md` alongside
+    `render_complexity_heatmap` (the visualization side, see
+    `src/render/mermaid.py`). Tested in
+    `tests/test_tools_surface.py` so the wrapper contract stays
+    pinned until 4.5 lands.
 
     Returns full Trailmark node dicts (same shape as
     `get_node`). Default threshold=10 matches Trailmark and

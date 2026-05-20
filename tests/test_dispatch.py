@@ -46,14 +46,22 @@ def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id_default_cache):
 def test_dispatch_includes_node_id_in_task(
     monkeypatch, tier0_graph_id_default_cache
 ):
+    """Task message uses the "Document the node `<id>`" verb the
+    main prompt steers on. After chunk 3.16's I15 refactor
+    (template parameterization), the verb is also coupling armor
+    — if the template gets swapped with the FlowTracer template,
+    this test catches it."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
     dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
 
+    assert any("Document the node" in c for c in fake.calls)
     assert any("src.tokens.ERC20:ERC20" in c for c in fake.calls)
     assert any("src.tokens.ERC4626:ERC4626" in c for c in fake.calls)
+    # Cross-check: NEVER use the flow-tracer verb.
+    assert not any("Trace the entrypoint" in c for c in fake.calls)
 
 
 def test_dispatch_continues_past_failures(

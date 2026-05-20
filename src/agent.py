@@ -250,17 +250,47 @@ def _validate_node_id(node_id: str) -> None:
         )
 
 
+# Task-message templates for the two dispatch verbs. The main
+# agent's system prompt steers on the verb at the start of the
+# task message ("Document the node ..." → NodeDocumenter;
+# "Trace the entrypoint ..." → FlowTracer). Keep both literal
+# verbs intact when editing — the orchestrator's prompt is
+# coupled to them.
+_NODE_DOC_TEMPLATE = (
+    "Document the node `{node_id}` in graph `{graph_id}`. "
+    "vault_path (absolute) = {vault_path}. "
+    "Dispatch the `node-documenter` subagent via the `task` "
+    "tool — do not generate note content yourself."
+)
+_FLOW_TRACE_TEMPLATE = (
+    "Trace the entrypoint `{node_id}` in graph "
+    "`{graph_id}`. vault_path (absolute) = {vault_path}. "
+    "Dispatch the `flow-tracer` subagent via the `task` tool — "
+    "do not generate the flow note content yourself."
+)
+
+
 def _invoke_one(
-    agent: Any, graph_id: str, node_id: str, vault_path: str
+    agent: Any,
+    graph_id: str,
+    node_id: str,
+    vault_path: str,
+    task_template: str = _NODE_DOC_TEMPLATE,
 ) -> dict[str, Any]:
-    """Single agent invocation for one node. Exceptions bubble up
-    to dispatch_topo, which records them per-node."""
+    """Single agent invocation. Validates `node_id` at the trust
+    boundary (chunk 3.14) then dispatches via `task_template`.
+    Exceptions bubble to the caller's dispatch loop, which records
+    them per-node.
+
+    Pre-3.16 this was duplicated as a separate `_invoke_one_flow`
+    (byte-identical except for the verb in the task message);
+    chunk 3.16's /review I15 collapsed them by parameterizing
+    the template. The current `_invoke_one_flow` is a one-line
+    wrapper preserved for call-site readability in dispatch_flows.
+    """
     _validate_node_id(node_id)
-    task_msg = (
-        f"Document the node `{node_id}` in graph `{graph_id}`. "
-        f"vault_path (absolute) = {vault_path}. "
-        f"Dispatch the `node-documenter` subagent via the `task` "
-        f"tool — do not generate note content yourself."
+    task_msg = task_template.format(
+        node_id=node_id, graph_id=graph_id, vault_path=vault_path
     )
     result = agent.invoke(
         {"messages": [{"role": "user", "content": task_msg}]}
@@ -398,20 +428,13 @@ def dispatch_topo(
 def _invoke_one_flow(
     agent: Any, graph_id: str, entrypoint_id: str, vault_path: str
 ) -> dict[str, Any]:
-    """Single agent invocation for one entrypoint. Exceptions bubble
-    up to dispatch_flows, which records them per-entrypoint."""
-    _validate_node_id(entrypoint_id)
-    task_msg = (
-        f"Trace the entrypoint `{entrypoint_id}` in graph "
-        f"`{graph_id}`. vault_path (absolute) = {vault_path}. "
-        f"Dispatch the `flow-tracer` subagent via the `task` tool — "
-        f"do not generate the flow note content yourself."
+    """Thin wrapper for FlowTracer dispatch (chunk 3.16). Routes
+    to `_invoke_one` with the flow-tracing task template; kept
+    as a named function so `dispatch_flows` reads clearly and the
+    chunk 3.14 validation test pattern stays unchanged."""
+    return _invoke_one(
+        agent, graph_id, entrypoint_id, vault_path, _FLOW_TRACE_TEMPLATE
     )
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": task_msg}]}
-    )
-    last = result["messages"][-1].content
-    return {"node_id": entrypoint_id, "agent_reply": last}
 
 
 def dispatch_flows(

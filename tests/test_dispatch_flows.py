@@ -61,6 +61,9 @@ def test_dispatch_flows_includes_entrypoint_id_in_task(
     assert any(
         "src.tokens.ERC4626:ERC4626.deposit" in c for c in fake.calls
     )
+    # Cross-check: NEVER use the node-documenter verb (chunk
+    # 3.16 I15 refactor — template-swap regression armor).
+    assert not any("Document the node" in c for c in fake.calls)
 
 
 def test_dispatch_flows_no_filter_includes_leaves(

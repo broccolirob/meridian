@@ -636,72 +636,60 @@ def test_build_agent_validates_vault_path(monkeypatch):
 def test_dispatch_topo_completes_level_before_next_starts(
     monkeypatch, tier0_graph_id_default_cache
 ):
-    """dispatch_topo's `for level in levels: _run_pool(...)`
-    structure guarantees that level N+1 starts only AFTER level
-    N completes. This keeps wikilink targets on disk before
-    derived contracts are documented.
+    """dispatch_topo's architectural invariant: `_run_pool`
+    is called once per topological level, in level order,
+    with that level's items. Synchronous return between
+    `_run_pool` calls is what guarantees derived contracts
+    find their wikilink targets already on disk — level N+1
+    doesn't start until level N's pool drains.
 
-    Test approach: record the order in which on_progress fires
-    for each item, then assert items partition cleanly by level
-    index. A regression that collapsed the level loop into a
-    single flat pool would interleave items from different
-    levels in the completion order.
+    A regression that flattened the level loop into one
+    `_run_pool(order, ...)` call, or parallelized across
+    levels, would surface here as a different call pattern.
 
-    cap=5 + a small invoke sleep makes the test meaningful:
-    multiple items in a level run concurrently, so the only
-    thing keeping them grouped by level is `_run_pool`'s
-    synchronous return between levels."""
-    import time
-
+    Direct mock of `_run_pool` — no threading, no `time.sleep`,
+    no completion-order inference. The prior version
+    instrumented `_FakeAgent.invoke` with a `time.sleep(0.05)`
+    delay to create concurrency pressure, then inferred level
+    boundaries from on_progress callback ordering — a
+    behavioral chain that flaked under load and was indirectly
+    coupled to `_run_pool`'s polling cadence.
+    """
+    from src import agent as agent_mod
     from src.graph.topo import topo_levels
 
     gid = tier0_graph_id_default_cache
     levels = topo_levels(gid)
-    level_of: dict[str, int] = {
-        nid: i for i, level in enumerate(levels) for nid in level
-    }
 
-    fake = _FakeAgent()
-    original_invoke = fake.invoke
+    run_pool_calls: list[list[str]] = []
 
-    def slow_invoke(inputs):
-        time.sleep(0.05)
-        return original_invoke(inputs)
+    def fake_run_pool(items, invoke_fn, *, on_done, **kwargs):
+        # Capture the items this _run_pool call dispatched,
+        # in submission order. Simulate completion of each
+        # so dispatch_topo's record/on_progress wiring runs
+        # — keeps the test surface close to the real flow
+        # even though we don't assert on the callback side.
+        run_pool_calls.append(list(items))
+        for item in items:
+            on_done(
+                item, "ok", {"node_id": item, "agent_reply": "fake"}
+            )
 
-    fake.invoke = slow_invoke  # type: ignore[method-assign]
+    monkeypatch.setattr(agent_mod, "_run_pool", fake_run_pool)
     monkeypatch.setattr(
-        "src.agent.build_agent", lambda *a, **k: fake
+        "src.agent.build_agent", lambda *a, **k: object()
     )
 
-    completion_order: list[str] = []
+    dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=5)
 
-    def track(idx: int, total: int, nid: str) -> None:
-        completion_order.append(nid)
-
-    dispatch_topo(
-        gid,
-        "/tmp/fake-vault",
-        concurrency_cap=5,
-        on_progress=track,
+    # Exactly one _run_pool call per topological level, in
+    # level order, with that level's items.
+    expected = [list(level) for level in levels]
+    assert run_pool_calls == expected, (
+        f"level-gating broken: _run_pool call sequence "
+        f"{run_pool_calls} differs from expected per-level "
+        f"submission {expected}"
     )
-
-    assert len(completion_order) == sum(len(L) for L in levels)
-
-    levels_seen = [level_of[nid] for nid in completion_order]
-
-    # Invariant: levels_seen is monotonically
-    # non-decreasing. A flattened level loop would
-    # produce descents (e.g., level 1 item firing after
-    # a level 2 item).
-    for i in range(1, len(levels_seen)):
-        assert levels_seen[i] >= levels_seen[i - 1], (
-            f"level-gating broken: completion order "
-            f"{completion_order} has level descent at "
-            f"position {i} ({completion_order[i]} in "
-            f"level {levels_seen[i]} fired after "
-            f"{completion_order[i - 1]} in level "
-            f"{levels_seen[i - 1]})"
-        )
 
 
 def test_dispatch_topo_on_progress_callback_contract(

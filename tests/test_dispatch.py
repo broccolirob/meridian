@@ -501,3 +501,110 @@ def test_pool_deadlock_detector_marks_queued_when_workers_hang():
             assert "per_invoke_timeout" in info
     finally:
         block.set()
+
+
+# --- graph_id + vault_path prompt-boundary validation (chunk 3.22 / C-NEW-7) ---
+
+
+def test_invoke_one_validates_graph_id():
+    """Chunk 3.22 / C-NEW-7: _invoke_one validates graph_id
+    at the LLM trust boundary. graph_id is interpolated into
+    the task template; injection chars (backticks, newlines)
+    would forge LLM instructions. Reuses _validate_graph_id
+    from persist.py (strict 12-hex allowlist)."""
+    from src.agent import _invoke_one
+
+    fake_agent = object()
+    bad_ids = [
+        "BACKTICK`HERE",       # backtick in graph_id
+        "new\nline123",        # newline
+        "tab\there0001",       # tab
+        "space here00",        # space
+        "TOOLONG_NHEX",        # non-hex (still 12 chars)
+        "abcdef",              # too short
+        "abcdef0123456",       # too long (13 hex)
+        "ABCDEF012345",        # uppercase (regex is lowercase-only)
+        "",                    # empty
+    ]
+    for bad in bad_ids:
+        with pytest.raises(ValueError, match="invalid graph_id"):
+            _invoke_one(fake_agent, bad, "src.X:X", "/v")
+
+
+def test_invoke_one_accepts_valid_graph_id():
+    """Sanity: 12-hex graph_ids produced by repo_hash pass.
+    Protects against a future regex tightening that
+    accidentally rejects legitimate IDs."""
+    from src.graph.persist import _validate_graph_id, repo_hash
+
+    real = repo_hash("/some/path")
+    assert len(real) == 12
+    _validate_graph_id(real)  # must not raise
+
+
+def test_build_agent_validates_graph_id(monkeypatch):
+    """build_agent rejects malformed graph_id before
+    constructing the system prompt that bakes it in."""
+    from src.agent import build_agent
+
+    # Stub ChatOpenAI so we don't hit the network (build_agent
+    # constructs one even if validation succeeds).
+    monkeypatch.setattr(
+        "src.agent.ChatOpenAI",
+        lambda *a, **k: object(),
+    )
+
+    for bad in ["BAD`TICK", "new\nline", "uppercase", ""]:
+        with pytest.raises(ValueError, match="invalid graph_id"):
+            build_agent(bad, "/abs/vault")
+
+
+def test_build_agent_validates_vault_path(monkeypatch):
+    """build_agent rejects vault paths that could inject into
+    the system prompt OR aren't absolute."""
+    from src.agent import build_agent
+
+    monkeypatch.setattr(
+        "src.agent.ChatOpenAI",
+        lambda *a, **k: object(),
+    )
+    # Also stub create_deep_agent so it doesn't try to wire up
+    # real LLM machinery during the sanity-pass at the end.
+    monkeypatch.setattr(
+        "src.agent.create_deep_agent",
+        lambda *a, **k: object(),
+    )
+
+    # Control chars: newline, carriage return, tab, NUL,
+    # unicode line/paragraph separators.
+    bad_chars = [
+        "/abs/vault\nINJECT",
+        "/abs/vault\rINJECT",
+        "/abs/vault\tinject",
+        "/abs/vault\x00inject",
+        "/abs/vault inject",
+        "/abs/vault inject",
+    ]
+    for bad in bad_chars:
+        with pytest.raises(
+            ValueError, match="contains control chars"
+        ):
+            build_agent("abc012345678", bad)
+
+    # Non-absolute paths.
+    for rel in ["relative/vault", "./vault", "vault"]:
+        with pytest.raises(ValueError, match="must be absolute"):
+            build_agent("abc012345678", rel)
+
+    # Empty.
+    with pytest.raises(ValueError, match="empty"):
+        build_agent("abc012345678", "")
+
+    # Sanity: a clean absolute path with spaces, parens, and
+    # a backtick passes (backticks are legal in POSIX and
+    # don't break the system prompt's `vault_path = {value}`
+    # syntax — no fence to escape).
+    build_agent(
+        "abc012345678",
+        "/path/with spaces/and (parens)/and`backtick",
+    )

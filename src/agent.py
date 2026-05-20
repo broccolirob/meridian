@@ -31,6 +31,7 @@ from typing import Any, Callable
 from deepagents import SubAgent, create_deep_agent
 from langchain_openai import ChatOpenAI
 
+from src.graph.persist import _validate_graph_id
 from src.graph.topo import topo_levels, topo_order
 from src.render.obsidian import (
     render_and_write_flow_note,
@@ -238,7 +239,17 @@ def build_agent(
     Subagent writer tools (`render_and_write_*_note`) are wrapped
     in closures that pre-bind `vault_path` so the LLM tool schema
     cannot expose it — chunk 3.17 C-NEW-2 fix.
+
+    Chunk 3.22 / C-NEW-7: validates both `graph_id` and
+    `vault_path` before building the system prompt that bakes
+    them in. Fails fast with ValueError at construction
+    rather than producing a corrupted system prompt that the
+    LLM then operates on.
     """
+    # Validate at the LLM trust boundary BEFORE constructing
+    # the system prompt that interpolates these values.
+    _validate_graph_id(graph_id)
+    _validate_vault_path(vault_path)
     # mypy doesn't see pydantic dynamic fields on ChatOpenAI;
     # `request_timeout` is in model_fields (confirmed via probe).
     llm = ChatOpenAI(
@@ -427,6 +438,53 @@ def _validate_node_id(node_id: str) -> None:
         )
 
 
+# Reject control chars (U+0000..U+001F, U+007F) and unicode
+# line/paragraph separators (U+2028, U+2029) in vault_path —
+# any of these could inject new prompt lines into the LLM
+# system message that interpolates vault_path. Backticks are
+# allowed: POSIX paths can legitimately contain them, and the
+# system prompt doesn't backtick-fence vault_path (uses
+# `vault_path = {value}` directly, no fence to escape).
+_VAULT_PATH_BAD_CHARS = re.compile(r"[\x00-\x1f\x7f  ]")
+_MAX_VAULT_PATH_LEN = 4096
+
+
+def _validate_vault_path(vault_path: str | Path) -> None:
+    """Reject vault paths that could inject into LLM prompt
+    surfaces (chunk 3.22 / C-NEW-7).
+
+    Disallowed:
+      - empty string
+      - length > 4096 chars
+      - any control char (U+0000..U+001F, U+007F)
+      - unicode line/paragraph separators (U+2028, U+2029)
+      - non-absolute paths
+
+    Allowed: spaces, parentheses, backticks, hyphens, all
+    standard POSIX path characters. Build_agent is the only
+    caller; ValueError there means agent construction failed
+    cleanly before any LLM-facing surface saw the bad value.
+    """
+    s = str(vault_path)
+    if not s:
+        raise ValueError("invalid vault_path: empty")
+    if len(s) > _MAX_VAULT_PATH_LEN:
+        raise ValueError(
+            f"invalid vault_path length: {len(s)} (must be "
+            f"1..{_MAX_VAULT_PATH_LEN})"
+        )
+    if _VAULT_PATH_BAD_CHARS.search(s):
+        raise ValueError(
+            "invalid vault_path: contains control chars or "
+            "unicode line separators (rejects \\n / \\r / \\t / "
+            "U+2028 / U+2029 to prevent LLM prompt injection)"
+        )
+    if not Path(s).is_absolute():
+        raise ValueError(
+            f"invalid vault_path {s!r}: must be absolute"
+        )
+
+
 # Task-message templates for the two dispatch verbs. The main
 # agent's system prompt steers on the verb at the start of the
 # task message ("Document the node ..." → NodeDocumenter;
@@ -465,6 +523,12 @@ def _invoke_one(
     wrapper preserved for call-site readability in dispatch_flows.
     """
     _validate_node_id(node_id)
+    # Chunk 3.22 / C-NEW-7: graph_id is interpolated into the
+    # task template, so it's part of the LLM prompt surface.
+    # Validate at this boundary (defense-in-depth — load_graph
+    # in persist.py already validates, but a future refactor
+    # could bypass that path).
+    _validate_graph_id(graph_id)
     task_msg = task_template.format(
         node_id=node_id, graph_id=graph_id
     )

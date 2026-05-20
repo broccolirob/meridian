@@ -380,3 +380,58 @@ def test_dispatch_flows_uses_concurrency_at_cap_5(
         f"dispatch_flows took {elapsed:.2f}s at cap=5; serial "
         f"would be ~1.2s. Parallelism not engaged?"
     )
+
+
+# --- dispatch_flows on_progress armor (chunk 3.23 / I-NEW-2) ---
+
+
+def test_dispatch_flows_on_progress_callback_contract(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    """Chunk 3.23 / I-NEW-2: parallel armor for
+    dispatch_flows. dispatch_flows and dispatch_topo share
+    `_make_recorder` but each builds its own recorder
+    instance — this test pins flows' wiring independently
+    (a future refactor that broke flows' wiring while
+    leaving topo's intact would slip past the topo armor).
+
+    Same three sub-properties as the dispatch_topo
+    on_progress test: signature, monotonic idx, constant
+    total."""
+    gid = tier0_graph_id_default_cache
+    fake = _FakeAgent()
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: fake
+    )
+
+    calls: list[tuple[int, int, str]] = []
+
+    def track(idx: int, total: int, nid: str) -> None:
+        calls.append((idx, total, nid))
+
+    result = dispatch_flows(
+        gid,
+        "/tmp/fake-vault",
+        concurrency_cap=5,
+        on_progress=track,
+    )
+
+    # Signature shape.
+    for idx, total, nid in calls:
+        assert isinstance(idx, int)
+        assert isinstance(total, int)
+        assert isinstance(nid, str)
+
+    # Monotonic 1..entrypoint_count.
+    indices = [c[0] for c in calls]
+    assert indices == list(range(1, len(indices) + 1)), (
+        f"flows progress_idx not monotonic 1..N: {indices}"
+    )
+
+    # Total constant, matches entrypoint_count.
+    totals = {c[1] for c in calls}
+    assert totals == {result["entrypoint_count"]}, (
+        f"flows total varied (expected single value "
+        f"matching entrypoint_count="
+        f"{result['entrypoint_count']}): {totals}"
+    )

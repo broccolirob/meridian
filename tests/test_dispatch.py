@@ -608,3 +608,143 @@ def test_build_agent_validates_vault_path(monkeypatch):
         "abc012345678",
         "/path/with spaces/and (parens)/and`backtick",
     )
+
+
+# --- dispatch_topo level-gating + on_progress armor (chunk 3.23) ---
+
+
+def test_dispatch_topo_completes_level_before_next_starts(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    """Chunk 3.23 / I-NEW-1: dispatch_topo's
+    `for level in levels: _run_pool(...)` structure
+    guarantees that level N+1 starts only AFTER level N
+    completes. This keeps wikilink targets on disk before
+    derived contracts are documented (chunk 3.5 design).
+
+    Test approach: record the order in which on_progress
+    fires for each item, then assert items partition
+    cleanly by level index. A regression that collapsed
+    the level loop into a single flat pool would
+    interleave items from different levels in the
+    completion order.
+
+    cap=5 + a small invoke sleep makes the test
+    meaningful: multiple items in a level run
+    concurrently, so the only thing keeping them grouped
+    by level is `_run_pool`'s synchronous return between
+    levels."""
+    import time
+
+    from src.graph.topo import topo_levels
+
+    gid = tier0_graph_id_default_cache
+    levels = topo_levels(gid)
+    level_of: dict[str, int] = {
+        nid: i for i, level in enumerate(levels) for nid in level
+    }
+
+    fake = _FakeAgent()
+    original_invoke = fake.invoke
+
+    def slow_invoke(inputs):
+        time.sleep(0.05)
+        return original_invoke(inputs)
+
+    fake.invoke = slow_invoke  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: fake
+    )
+
+    completion_order: list[str] = []
+
+    def track(idx: int, total: int, nid: str) -> None:
+        completion_order.append(nid)
+
+    dispatch_topo(
+        gid,
+        "/tmp/fake-vault",
+        concurrency_cap=5,
+        on_progress=track,
+    )
+
+    assert len(completion_order) == sum(len(L) for L in levels)
+
+    levels_seen = [level_of[nid] for nid in completion_order]
+
+    # Invariant: levels_seen is monotonically
+    # non-decreasing. A flattened level loop would
+    # produce descents (e.g., level 1 item firing after
+    # a level 2 item).
+    for i in range(1, len(levels_seen)):
+        assert levels_seen[i] >= levels_seen[i - 1], (
+            f"level-gating broken: completion order "
+            f"{completion_order} has level descent at "
+            f"position {i} ({completion_order[i]} in "
+            f"level {levels_seen[i]} fired after "
+            f"{completion_order[i - 1]} in level "
+            f"{levels_seen[i - 1]})"
+        )
+
+
+def test_dispatch_topo_on_progress_callback_contract(
+    monkeypatch, tier0_graph_id_default_cache
+):
+    """Chunk 3.23 / I-NEW-2: pin the on_progress callback
+    contract.
+
+    Three sub-properties:
+    1. Signature: callback invoked with
+       `(idx: int, total: int, item_id: str)`.
+    2. `idx` monotonically increases 1..N as items
+       complete (chunk 3.16 I16 cross-level accumulation
+       invariant).
+    3. `total` is the same `node_count` for every call.
+
+    No existing test covers any of these. A regression
+    that, e.g., reset progress_idx per level, or swapped
+    argument order, would silently break notebook
+    progress bars without any current test failing."""
+    gid = tier0_graph_id_default_cache
+    fake = _FakeAgent()
+    monkeypatch.setattr(
+        "src.agent.build_agent", lambda *a, **k: fake
+    )
+
+    calls: list[tuple[int, int, str]] = []
+
+    def track(idx: int, total: int, nid: str) -> None:
+        calls.append((idx, total, nid))
+
+    result = dispatch_topo(
+        gid,
+        "/tmp/fake-vault",
+        concurrency_cap=5,
+        on_progress=track,
+    )
+
+    # Sub-property 1: signature shape.
+    for idx, total, nid in calls:
+        assert isinstance(idx, int)
+        assert isinstance(total, int)
+        assert isinstance(nid, str)
+
+    # Sub-property 2: idx monotonically 1..N.
+    indices = [c[0] for c in calls]
+    assert indices == list(range(1, len(indices) + 1)), (
+        f"progress_idx not monotonic 1..N (chunk 3.16 I16 "
+        f"cross-level accumulation broken): {indices}"
+    )
+
+    # Sub-property 3: total constant, equals node_count.
+    totals = {c[1] for c in calls}
+    assert totals == {result["node_count"]}, (
+        f"total varied across calls (expected single value "
+        f"matching node_count={result['node_count']}): "
+        f"{totals}"
+    )
+
+    # Sanity: every dispatched node fired exactly one
+    # callback.
+    nids = [c[2] for c in calls]
+    assert sorted(nids) == sorted(result["order"])

@@ -327,11 +327,18 @@ def test_gather_logs_and_continues_when_on_done_raises():
             called.append(nid)
             raise RuntimeError(f"simulated callback failure: {nid}")
 
+        # Mock start_times — these test futures complete fast
+        # enough that no timeout check fires; an empty dict is
+        # fine (queued-future code path will skip per-invoke
+        # check for items not in start_times).
+        start_times: dict[str, float] = {}
+
         start = time.monotonic()
         # Must NOT raise. The gather function swallows on_done
         # exceptions and continues.
         _gather_with_per_invoke_timeout(
             futures_map,
+            start_times=start_times,
             per_invoke_timeout=10.0,
             on_done=broken_on_done,
         )
@@ -349,3 +356,148 @@ def test_gather_logs_and_continues_when_on_done_raises():
         )
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+
+
+# --- worker-time per-invoke deadline (chunk 3.20 / C-NEW-5) ---
+
+
+def test_per_invoke_timeout_does_not_count_queue_wait():
+    """Chunk 3.20 / C-NEW-5: tail items in a saturated pool
+    must NOT consume their per_invoke_timeout while queued.
+    Pre-3.20 the deadline was stamped at submission, so any
+    item queued for > per_invoke_timeout seconds before its
+    worker started would be marked TimeoutError despite
+    never having run.
+
+    Test setup: 30 items × 80ms work × cap=5 ×
+    per_invoke_timeout=0.4s. The tail (items 21-30) finish
+    queue+work past their 0.4s submission deadline. Pre-3.20
+    they fail with TimeoutError; post-3.20 they all succeed
+    because their workers' per-invoke clocks start when
+    execution actually begins.
+
+    Production scenario this armor protects: Tier-2 codebase
+    with 80 entrypoints × cap=5 × 60s avg runtime, where
+    items 50+ would spuriously time out under submission-
+    time accounting."""
+    import time
+    from typing import Any
+
+    from src.agent import _run_pool
+
+    items = [f"item_{i:02d}" for i in range(30)]
+    results: list[tuple[str, str]] = []
+
+    def slow_invoke(item_id: str) -> dict[str, Any]:
+        time.sleep(0.08)  # 80ms of "work"
+        return {"node_id": item_id, "agent_reply": "ok"}
+
+    def on_done(item_id: str, status: str, info: Any) -> None:
+        results.append((item_id, status))
+
+    _run_pool(
+        items,
+        slow_invoke,
+        concurrency_cap=5,
+        per_invoke_timeout=0.4,
+        on_done=on_done,
+        log_kind="dispatch",
+    )
+
+    statuses = {item: status for item, status in results}
+    succeeded = sum(1 for s in statuses.values() if s == "ok")
+    failed = sum(1 for s in statuses.values() if s == "fail")
+
+    assert succeeded == 30, (
+        f"expected all 30 items to succeed under post-3.20 "
+        f"worker-time deadline accounting; got "
+        f"{succeeded} succeed, {failed} fail. Pre-3.20 the "
+        f"queue-wait of items 21-30 would consume their "
+        f"per_invoke_timeout before workers picked them up."
+    )
+
+
+def test_pool_deadlock_detector_marks_queued_when_workers_hang():
+    """Chunk 3.20 / C-NEW-5: when running workers hang AND
+    queued items can't make progress, the gather loop's
+    deadlock detector marks them as failed after
+    2× per_invoke_timeout of no progress. Without the
+    detector, dispatch would loop forever (queued items
+    have no per-invoke deadline; running items are hung).
+
+    This test exercises `_run_pool` DIRECTLY with synthetic
+    hanging items so the per-invoke vs deadlock split is
+    deterministic (cap=2 + 8 items = exactly 2 per-invoke +
+    6 deadlock). The end-to-end chunk 3.11 hang test
+    (`test_dispatch_per_invoke_timeout_records_failure`)
+    goes through dispatch_topo's level loop, where each
+    level creates a fresh pool — the per-level split varies
+    with tier 0's topology and isn't a good unit-level
+    contract."""
+    import threading
+    import time
+    from typing import Any
+
+    from src.agent import _run_pool
+
+    block = threading.Event()  # never set during the test
+    items = [f"item_{i}" for i in range(8)]
+    results: list[tuple[str, str, Any]] = []
+
+    def hanging_invoke(item_id: str) -> dict[str, Any]:
+        # Hang indefinitely. The safety timeout (5s) makes the
+        # test fail-fast if the deadlock detector doesn't fire.
+        block.wait(timeout=5.0)
+        return {"node_id": item_id, "agent_reply": "/never.md"}
+
+    def on_done(item_id: str, status: str, info: Any) -> None:
+        results.append((item_id, status, info))
+
+    try:
+        start = time.monotonic()
+        _run_pool(
+            items,
+            hanging_invoke,
+            concurrency_cap=2,
+            per_invoke_timeout=0.2,
+            on_done=on_done,
+            log_kind="test",
+        )
+        elapsed = time.monotonic() - start
+
+        # Total runtime: 0.2s per-invoke + 0.4s deadlock + a bit
+        # of poll-interval slack. Should be well under 2s.
+        assert elapsed < 2.0, (
+            f"_run_pool took {elapsed:.2f}s — possibly looped"
+        )
+
+        # All 8 items dispatched to on_done.
+        assert len(results) == 8
+
+        # The split: 2 running workers hit per-invoke timeout
+        # at t=0.2; 6 queued items hit deadlock detection at
+        # t≈0.6.
+        invoke_msgs = [
+            info for _, _, info in results
+            if "invocation exceeded" in info
+        ]
+        deadlock_msgs = [
+            info for _, _, info in results
+            if "pool made no progress" in info
+        ]
+        assert len(invoke_msgs) == 2, (
+            f"expected 2 per-invoke timeouts (the cap=2 running "
+            f"workers); got {len(invoke_msgs)}: {invoke_msgs}"
+        )
+        assert len(deadlock_msgs) == 6, (
+            f"expected 6 deadlock-detected failures (the queued "
+            f"items); got {len(deadlock_msgs)}: {deadlock_msgs}"
+        )
+
+        # All messages contain the contract substrings the
+        # chunk 3.11 hang test asserts.
+        for _, _, info in results:
+            assert "TimeoutError" in info
+            assert "per_invoke_timeout" in info
+    finally:
+        block.set()

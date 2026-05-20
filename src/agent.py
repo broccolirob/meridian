@@ -262,31 +262,48 @@ def build_agent(
 def _gather_with_per_invoke_timeout(
     futures_map: dict[concurrent.futures.Future, str],
     *,
+    start_times: dict[str, float],
     per_invoke_timeout: float,
     on_done: Callable[[str, str, Any], None],
 ) -> None:
-    """Drain `futures_map` with a per-future deadline.
+    """Drain `futures_map` with a per-future deadline keyed off
+    WORKER START TIME (not submission). `start_times` is written
+    by the worker thread in `_try_one` as its first action; gather
+    reads it to detect hung workers (chunk 3.20 / C-NEW-5).
 
-    For each future:
-      - completes within `per_invoke_timeout`: invokes
-        `on_done(node_id, status, info)` with the result.
-      - exceeds the deadline: invokes
-        `on_done(node_id, "fail", "TimeoutError: …")` and calls
-        `future.cancel()` (best-effort — Python can't kill a
-        running thread; daemon workers die when the process
-        exits).
+    Three drain paths per polling iteration:
+
+    1. Completion: future is `done`. on_done invoked with the
+       result (or a "fail" tuple if `future.result()` raised).
+    2. Per-invoke timeout (running worker hang): item_id is in
+       `start_times` and `now - start_times[item_id]` exceeds
+       `per_invoke_timeout`. on_done invoked with a TimeoutError
+       describing the per-invoke breach; future.cancel() is best-
+       effort (Python can't kill running threads — daemon workers
+       die when the process exits).
+    3. Pool deadlock (all workers wedged): pending hasn't
+       decreased in `2 × per_invoke_timeout` seconds. Remaining
+       pending futures (queued AND any still-running) marked as
+       TimeoutError. Catches the case where workers hang and
+       their replacements can't start, so the dispatch returns
+       a complete summary instead of looping forever.
+
+    Queued futures (item_id NOT in `start_times`) have no per-
+    invoke deadline — they're not running, so the per-invoke
+    timeout doesn't apply. The deadlock detector catches the
+    pathological "queue never advances" case.
 
     Polls with `concurrent.futures.wait` so completed futures are
     drained promptly, and hung futures are detected within
     poll-interval seconds of crossing their deadline.
     """
     pending = set(futures_map.keys())
-    start_times: dict[concurrent.futures.Future, float] = {
-        f: time.monotonic() for f in pending
-    }
     poll_interval = min(2.0, max(0.05, per_invoke_timeout / 4))
+    # Deadlock detector: time of last `pending` decrease.
+    last_progress = time.monotonic()
 
     while pending:
+        size_before = len(pending)
         done, _still_pending = concurrent.futures.wait(
             pending,
             timeout=poll_interval,
@@ -321,11 +338,18 @@ def _gather_with_per_invoke_timeout(
             finally:
                 pending.discard(future)
 
-        # Timeout branch.
+        # Per-invoke timeout branch: only RUNNING workers have a
+        # deadline. Queued futures (not in start_times) wait.
         now = time.monotonic()
         for future in list(pending):
-            if now - start_times[future] > per_invoke_timeout:
-                nid = futures_map[future]
+            nid = futures_map[future]
+            if nid not in start_times:
+                # Future hasn't been picked up by a worker yet
+                # (queued behind a saturated pool). No invocation
+                # to time out. The deadlock detector below will
+                # catch a genuinely wedged pool.
+                continue
+            if now - start_times[nid] > per_invoke_timeout:
                 try:
                     on_done(
                         nid,
@@ -336,6 +360,37 @@ def _gather_with_per_invoke_timeout(
                 except Exception:
                     _log.exception(
                         "on_done raised for %s during timeout "
+                        "handling; continuing",
+                        nid,
+                    )
+                finally:
+                    future.cancel()
+                    pending.discard(future)
+
+        # Pool deadlock detector: if no future has been
+        # discarded in 2× per_invoke_timeout seconds, the pool
+        # is wedged (workers hung AND replacements can't start).
+        # Mark remaining pending as failed so the dispatch
+        # returns a complete summary.
+        if len(pending) < size_before:
+            last_progress = time.monotonic()
+        elif (
+            pending
+            and time.monotonic() - last_progress
+            > 2 * per_invoke_timeout
+        ):
+            deadlock_msg = (
+                f"TimeoutError: pool made no progress for "
+                f"2 × per_invoke_timeout={2 * per_invoke_timeout}s "
+                f"(queue blocked behind hung workers)"
+            )
+            for future in list(pending):
+                nid = futures_map[future]
+                try:
+                    on_done(nid, "fail", deadlock_msg)
+                except Exception:
+                    _log.exception(
+                        "on_done raised for %s during deadlock "
                         "handling; continuing",
                         nid,
                     )
@@ -501,7 +556,23 @@ def _run_pool(
     derived from invoke_fn — so log greps for "flow dispatch
     failed" continue to match.
     """
+    # Worker-stamped actual start times, keyed by item_id (not
+    # Future identity, because the worker thread doesn't know
+    # its own Future). Pre-3.20 the per-invoke deadline was set
+    # at SUBMISSION, so tail items queued behind saturated
+    # workers would burn their entire per_invoke_timeout
+    # budget on queue wait. Now the worker stamps this on
+    # entry; _gather uses it for the deadline check (chunk 3.20
+    # / C-NEW-5).
+    start_times: dict[str, float] = {}
+
     def _try_one(item_id: str) -> tuple[str, Any]:
+        # FIRST action: stamp the actual worker start time so
+        # _gather's deadline check is against execution time,
+        # not submission time. CPython dict ops are atomic per-
+        # key — no lock needed for this single-key write paired
+        # with single-key reads in _gather.
+        start_times[item_id] = time.monotonic()
         try:
             return ("ok", invoke_fn(item_id))
         except Exception as e:
@@ -515,6 +586,7 @@ def _run_pool(
         }
         _gather_with_per_invoke_timeout(
             futures_map,
+            start_times=start_times,
             per_invoke_timeout=per_invoke_timeout,
             on_done=on_done,
         )

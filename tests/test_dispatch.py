@@ -352,57 +352,90 @@ def test_gather_logs_and_continues_when_on_done_raises():
 
 
 def test_per_invoke_timeout_does_not_count_queue_wait():
-    """Tail items in a saturated pool must NOT consume their
-    per_invoke_timeout while queued. The deadline is keyed off
-    actual worker start time (stamped by `_try_one`), not
-    submission time — so items queued for > per_invoke_timeout
-    seconds before their worker started don't get marked as
-    spurious TimeoutErrors.
+    """Queued items (not yet picked up by a worker) must NOT
+    be marked as TimeoutError by the per-invoke timeout
+    branch. The contract lives in
+    `_gather_with_per_invoke_timeout`:
 
-    Test setup: 30 items × 80ms work × cap=5 ×
-    per_invoke_timeout=0.4s. The tail (items 21-30) finish
-    queue+work past their 0.4s submission deadline; the test
-    asserts they all succeed because their workers' per-invoke
-    clocks start when execution actually begins.
+        if nid not in start_times:
+            continue  # queued, no invocation to time out
 
-    Production scenario this armor protects: Tier-2 codebase
-    with 80 entrypoints × cap=5 × 60s avg runtime, where items
-    50+ would spuriously time out under submission-time
-    accounting."""
-    import time
+    If counted, tail items in a saturated pool would
+    spuriously fail before their workers ever started — e.g.,
+    a Tier-2 codebase with 80 entrypoints × cap=5 × 60s avg
+    runtime would lose items 50+.
+
+    Direct unit test of the gather-level contract using
+    synthetic Futures. Replaces an earlier integration test
+    that ran 30 items × time.sleep(0.08) × cap=5 ×
+    per_invoke_timeout=0.4s. That setup co-varied test
+    runtime with the deadlock-detector window — under CI
+    load, individual sleeps stretched past 0.4s
+    (per-invoke fire) or total runtime exceeded 0.8s
+    (deadlock fire), producing flakes. The new test
+    completes in milliseconds with zero threading
+    dependency."""
+    import time as _time
+    from concurrent.futures import Future
     from typing import Any
 
-    from src.agent import _run_pool
+    from src.agent import _gather_with_per_invoke_timeout
 
-    items = [f"item_{i:02d}" for i in range(30)]
-    results: list[tuple[str, str]] = []
+    # Synthetic pending futures — no ThreadPoolExecutor. The
+    # contract under test is purely about how the gather loop
+    # interprets start_times.
+    future_running = Future()
+    future_queued = Future()
+    futures_map = {
+        future_running: "item_running",
+        future_queued: "item_queued",
+    }
+    # item_running "started" 999s ago — deadline expired
+    # immediately on first poll. item_queued has NO entry in
+    # start_times — proving the "if nid not in start_times:
+    # continue" contract.
+    start_times = {"item_running": _time.monotonic() - 999.0}
 
-    def slow_invoke(item_id: str) -> dict[str, Any]:
-        time.sleep(0.08)  # 80ms of "work"
-        return {"node_id": item_id, "agent_reply": "ok"}
+    on_done_calls: list[tuple[str, str, Any]] = []
 
     def on_done(item_id: str, status: str, info: Any) -> None:
-        results.append((item_id, status))
+        on_done_calls.append((item_id, status, info))
+        if item_id == "item_running":
+            # Resolve the queued future so the gather loop
+            # can drain it through the completion branch.
+            # If this set_result were the per-invoke timeout
+            # branch firing on item_queued instead, the test
+            # would fail with "fail" status.
+            future_queued.set_result(
+                ("ok", {"agent_reply": "queued and ran"})
+            )
 
-    _run_pool(
-        items,
-        slow_invoke,
-        concurrency_cap=5,
-        per_invoke_timeout=0.4,
+    _gather_with_per_invoke_timeout(
+        futures_map,
+        start_times=start_times,
+        per_invoke_timeout=0.1,
         on_done=on_done,
-        log_kind="dispatch",
     )
 
-    statuses = {item: status for item, status in results}
-    succeeded = sum(1 for s in statuses.values() if s == "ok")
-    failed = sum(1 for s in statuses.values() if s == "fail")
-
-    assert succeeded == 30, (
-        f"expected all 30 items to succeed under worker-time "
-        f"deadline accounting; got {succeeded} succeed, "
-        f"{failed} fail. The queue-wait of items 21-30 should "
-        f"not consume their per_invoke_timeout before workers "
-        f"pick them up."
+    results = {
+        nid: (status, info) for nid, status, info in on_done_calls
+    }
+    # item_running: per-invoke timeout fired (it's "running"
+    # with a deadline 999s in the past).
+    assert results["item_running"][0] == "fail", (
+        f"item_running should have hit per-invoke timeout; "
+        f"got {results['item_running']}"
+    )
+    assert "TimeoutError" in str(results["item_running"][1])
+    # item_queued: succeeded via the completion branch —
+    # NOT marked failed by the per-invoke branch despite
+    # having no start_times entry. THIS is the contract.
+    assert results["item_queued"] == (
+        "ok", {"agent_reply": "queued and ran"}
+    ), (
+        f"item_queued should have succeeded — queue wait "
+        f"must NOT count toward per_invoke_timeout. Got "
+        f"{results['item_queued']}"
     )
 
 

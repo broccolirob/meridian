@@ -3,11 +3,11 @@ import pytest
 from src.render.mermaid import render_sequence
 
 # A hand-built 4-hop path with 3 distinct containing classes —
-# satisfies the chunk 3.3 success criterion. Each node is a real
-# Tier 1 node ID (validated by the renderer via load_graph).
-# This isn't a real call chain in the graph (uniswapV2Call
-# doesn't actually call getReserves), but render_sequence is
-# path-agnostic by design — see plan's design decision #1.
+# satisfies the render_sequence success criterion. Each node is
+# a real Tier 1 node ID (validated by the renderer via
+# load_graph). This isn't a real call chain in the graph
+# (uniswapV2Call doesn't actually call getReserves), but
+# render_sequence is path-agnostic by design.
 SWAP_PATH = [
     "contracts.UniswapV2Pair:UniswapV2Pair.swap",
     "contracts.interfaces.IUniswapV2Callee:IUniswapV2Callee.uniswapV2Call",
@@ -17,8 +17,8 @@ SWAP_PATH = [
 
 
 def test_renders_three_plus_participants(tier1_graph_id):
-    """Chunk 3.3 success criterion: a known swap path renders
-    with three or more participants."""
+    """Success criterion: a known swap path renders with three
+    or more participants."""
     gid, cache_root = tier1_graph_id
     out = render_sequence(gid, SWAP_PATH, cache_root=cache_root)
     assert out.count("    participant ") >= 3

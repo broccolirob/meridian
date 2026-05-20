@@ -11,7 +11,7 @@ from src.tools import (
 
 
 def test_attack_surface_includes_swap_mint_burn(tier1_graph_id):
-    """Chunk 3.6 success criterion: swap, mint, burn appear as
+    """Success criterion: swap, mint, burn appear as
     entrypoints in Tier 1's attack surface."""
     gid, cache_root = tier1_graph_id
     surface = attack_surface(gid, cache_root=cache_root)
@@ -47,12 +47,11 @@ def test_attack_surface_entries_describe_external_public(tier1_graph_id):
 
 
 def test_attack_surface_excludes_internal_methods(tier1_graph_id):
-    """Negative assertion (chunk 3.16, /review I5): Solidity
-    `private`/`internal` methods must NOT appear in
-    attack_surface. The positive tests above (swap/mint/burn
-    present) don't catch a regression where visibility detection
-    breaks and Trailmark surfaces every method — they'd still
-    pass.
+    """Negative assertion: Solidity `private`/`internal`
+    methods must NOT appear in attack_surface. The positive
+    tests above (swap/mint/burn present) don't catch a
+    regression where visibility detection breaks and Trailmark
+    surfaces every method — they'd still pass.
 
     Internals are confirmed present in the graph (via
     `list_nodes(kind='method')`) before asserting absence from
@@ -138,8 +137,7 @@ def test_entrypoint_paths_to_entrypoint_is_empty(tier1_graph_id):
 
 def test_complexity_hotspots_threshold_4_returns_three(tier1_graph_id):
     """Tier 1 has 3 methods at CC>=4: _mintFee (CC=6), swap
-    (CC=4), Math.sqrt (CC=4). Matches the heatmap inventory
-    from chunk 3.4."""
+    (CC=4), Math.sqrt (CC=4)."""
     gid, cache_root = tier1_graph_id
     hot = complexity_hotspots(gid, threshold=4, cache_root=cache_root)
     assert len(hot) == 3
@@ -174,13 +172,11 @@ def test_complexity_hotspots_returns_node_dicts(tier1_graph_id):
 
 
 def test_complexity_hotspots_rejects_negative_threshold(tier1_graph_id):
-    """Chunk 3.16 /review I12: cyclomatic complexity is
-    non-negative, so a negative threshold would match every
-    method — almost certainly a caller-side bug. Reject with
-    ValueError, matching the same validation in
-    `render_complexity_heatmap` (src/render/mermaid.py:415)
-    so both surfaces of the heatmap pipeline reject the same
-    bad input."""
+    """Cyclomatic complexity is non-negative, so a negative
+    threshold would match every method — almost certainly a
+    caller-side bug. Reject with ValueError, matching the same
+    validation in `render_complexity_heatmap` so both surfaces
+    of the heatmap pipeline reject the same bad input."""
     gid, cache_root = tier1_graph_id
     for bad in (-1, -10, -100):
         with pytest.raises(ValueError, match="threshold must be >= 0"):

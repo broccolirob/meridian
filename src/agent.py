@@ -45,19 +45,18 @@ _log = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_CONCURRENCY_CAP = 5
 # Allowlist of characters permitted in node IDs entering the
-# agent's LLM prompt surface (chunk 3.14). Today's Trailmark
-# Solidity IDs match this exactly. If we add support for
-# languages whose identifiers contain other characters, expand
-# here AND add a regression test.
+# agent's LLM prompt surface. Today's Trailmark Solidity IDs
+# match this exactly. If we add support for languages whose
+# identifiers contain other characters, expand here AND add a
+# regression test.
 _NODE_ID_RE = re.compile(r"^[A-Za-z0-9_:.]+$")
 # Bound the input so a pathological repo can't bloat the prompt
 # or memory. Real Trailmark IDs cap around 100 chars; 500 is
 # generous headroom.
 _MAX_NODE_ID_LEN = 500
 # Per-invocation timeout (seconds) for one agent.invoke() call.
-# Chunk 3.11 closes the chunk 3.5 hang: gpt-5-mini calls typically
-# take 5-15s; 600s is the deadline beyond which we declare the
-# call hung and move on.
+# gpt-5-mini calls typically take 5-15s; 600s is the deadline
+# beyond which we declare the call hung and move on.
 DEFAULT_PER_INVOKE_TIMEOUT = 600.0
 # ChatOpenAI's HTTP request_timeout is set slightly below the
 # orchestrator's per_invoke_timeout so HTTP fails first, the
@@ -135,11 +134,10 @@ def _wrap_subagent_writers(
     """Replace raw `render_and_write_*_note` functions in a
     subagent's tool list with closures that pre-bind `vault_path`.
 
-    Chunk 3.17 (C-NEW-2 fix): the second-pass /review verified
-    that LangChain's default schema generation exposed
-    `vault_path` as an LLM-callable parameter on both writers,
-    giving a prompt-injected agent a write-anywhere primitive.
-    The closure approach:
+    LangChain's default schema generation exposes any keyword-
+    only param (including `vault_path`) as LLM-callable, which
+    would give a prompt-injected agent a write-anywhere
+    primitive. The closure approach:
 
     - Captures the orchestrator's trusted `vault_path` at build
       time so the LLM cannot supply its own.
@@ -226,7 +224,8 @@ def build_agent(
     `request_timeout` (seconds) sets ChatOpenAI's per-HTTP-request
     timeout — slightly below the orchestrator's per-invoke timeout
     so HTTP fails first and worker threads exit cleanly. Set to
-    None to disable (NOT recommended — see chunk 3.5 hang).
+    None to disable (NOT recommended — see DEFAULT_PER_INVOKE_TIMEOUT
+    comment for the hang scenario this protects against).
 
     Returns a langgraph `CompiledStateGraph` ready for `.invoke()`.
     The agent is wired with BOTH subagents (NodeDocumenter +
@@ -238,13 +237,12 @@ def build_agent(
 
     Subagent writer tools (`render_and_write_*_note`) are wrapped
     in closures that pre-bind `vault_path` so the LLM tool schema
-    cannot expose it — chunk 3.17 C-NEW-2 fix.
+    cannot expose it (see `_wrap_subagent_writers`).
 
-    Chunk 3.22 / C-NEW-7: validates both `graph_id` and
-    `vault_path` before building the system prompt that bakes
-    them in. Fails fast with ValueError at construction
-    rather than producing a corrupted system prompt that the
-    LLM then operates on.
+    Validates both `graph_id` and `vault_path` before building
+    the system prompt that bakes them in. Fails fast with
+    ValueError at construction rather than producing a corrupted
+    system prompt that the LLM then operates on.
     """
     # Validate at the LLM trust boundary BEFORE constructing
     # the system prompt that interpolates these values.
@@ -280,7 +278,7 @@ def _gather_with_per_invoke_timeout(
     """Drain `futures_map` with a per-future deadline keyed off
     WORKER START TIME (not submission). `start_times` is written
     by the worker thread in `_try_one` as its first action; gather
-    reads it to detect hung workers (chunk 3.20 / C-NEW-5).
+    reads it to detect hung workers.
 
     Three drain paths per polling iteration:
 
@@ -320,8 +318,8 @@ def _gather_with_per_invoke_timeout(
 
         Used by both the completion branch (futures that wait()
         returned in `done`) and the race-recovery path inside
-        the timeout branch (chunk 3.27 I-NEW-9: futures that
-        became done between wait() and the deadline check).
+        the timeout branch (for futures that became done between
+        wait() and the deadline check).
         """
         nid = futures_map[future]
         try:
@@ -330,10 +328,9 @@ def _gather_with_per_invoke_timeout(
             except Exception as e:
                 status, info = "fail", f"{type(e).__name__}: {e}"
             # A failure HERE (e.g., caller-supplied on_progress
-            # hit a broken pipe) is logged and swallowed so
-            # the gather loop drains the rest of pending
-            # instead of abandoning in-flight workers (chunk
-            # 3.19, /review C-NEW-4).
+            # hit a broken pipe) is logged and swallowed so the
+            # gather loop drains the rest of pending instead of
+            # abandoning in-flight workers.
             try:
                 on_done(nid, status, info)
             except Exception:
@@ -356,11 +353,11 @@ def _gather_with_per_invoke_timeout(
         for future in done:
             _drain_completion(future)
 
-        # Per-invoke timeout branch with race recovery
-        # (chunk 3.27 I-NEW-9): a future may have completed
-        # between wait() and now. Check done() first so we
-        # process race-completed futures as completions
-        # rather than mis-marking them as TimeoutErrors.
+        # Per-invoke timeout branch with race recovery: a
+        # future may have completed between wait() and now.
+        # Check done() first so we process race-completed
+        # futures as completions rather than mis-marking them
+        # as TimeoutErrors.
         now = time.monotonic()
         for future in list(pending):
             if future.done():
@@ -429,10 +426,9 @@ def _gather_with_per_invoke_timeout(
 
 def _validate_node_id(node_id: str) -> None:
     """Allowlist validation for node IDs entering the agent's
-    LLM prompt surface (chunk 3.14). Defends against prompt
-    injection via backticks, newlines, or other chars that could
-    escape the backtick-quoted fence in `_invoke_one*` task
-    messages.
+    LLM prompt surface. Defends against prompt injection via
+    backticks, newlines, or other chars that could escape the
+    backtick-quoted fence in `_invoke_one` task messages.
 
     Today's Solidity IDs match `[A-Za-z0-9_:.]+` exactly (probed
     against Tier 0/1 fixtures). If Trailmark grows other-language
@@ -468,7 +464,7 @@ _MAX_VAULT_PATH_LEN = 4096
 
 def _validate_vault_path(vault_path: str | Path) -> None:
     """Reject vault paths that could inject into LLM prompt
-    surfaces (chunk 3.22 / C-NEW-7).
+    surfaces.
 
     Disallowed:
       - empty string
@@ -528,23 +524,19 @@ def _invoke_one(
     vault_path: str,
     task_template: str = _NODE_DOC_TEMPLATE,
 ) -> dict[str, Any]:
-    """Single agent invocation. Validates `node_id` at the trust
-    boundary (chunk 3.14) then dispatches via `task_template`.
-    Exceptions bubble to the caller's dispatch loop, which records
-    them per-node.
+    """Single agent invocation. Validates `node_id` and
+    `graph_id` at the LLM trust boundary, then dispatches via
+    `task_template`. Exceptions bubble to the caller's dispatch
+    loop, which records them per-node.
 
-    Pre-3.16 this was duplicated as a separate `_invoke_one_flow`
-    (byte-identical except for the verb in the task message);
-    chunk 3.16's /review I15 collapsed them by parameterizing
-    the template. The current `_invoke_one_flow` is a one-line
-    wrapper preserved for call-site readability in dispatch_flows.
+    `task_template` defaults to the NodeDocumenter prompt;
+    pass `_FLOW_TRACE_TEMPLATE` for the FlowTracer dispatch.
     """
     _validate_node_id(node_id)
-    # Chunk 3.22 / C-NEW-7: graph_id is interpolated into the
-    # task template, so it's part of the LLM prompt surface.
-    # Validate at this boundary (defense-in-depth — load_graph
-    # in persist.py already validates, but a future refactor
-    # could bypass that path).
+    # graph_id is interpolated into the task template, so it's
+    # part of the LLM prompt surface. Validate at this boundary
+    # (defense-in-depth — load_graph in persist.py already
+    # validates, but a future refactor could bypass that path).
     _validate_graph_id(graph_id)
     task_msg = task_template.format(
         node_id=node_id, graph_id=graph_id
@@ -563,12 +555,11 @@ def _make_recorder(
     total: int,
     on_progress: Callable[[int, int, str], None] | None,
 ) -> Callable[[str, str, Any], None]:
-    """Build the on_done callback shared by both dispatchers
-    (chunk 3.16, /review I16). Appends successful invokes to
-    `successes`, failures to `failures` (with a `"node_id"` key
-    even for entrypoints — the failure dict shape is uniform),
-    and fires `on_progress(idx, total, item_id)` per completed
-    item.
+    """Build the on_done callback shared by both dispatchers.
+    Appends successful invokes to `successes`, failures to
+    `failures` (with a `"node_id"` key even for entrypoints —
+    the failure dict shape is uniform), and fires
+    `on_progress(idx, total, item_id)` per completed item.
 
     The returned closure owns its own progress index that
     accumulates across multiple `_run_pool` calls — this is
@@ -587,13 +578,13 @@ def _make_recorder(
         nonlocal progress_idx
         progress_idx += 1
         # Record the outcome BEFORE notifying the caller. A
-        # broken on_progress callback (chunk 3.19 / C-NEW-4)
-        # must not lose the outcome tracking — the dispatch's
-        # whole point is to return a complete summary. Notify
-        # second so that even if on_progress raises and the
-        # exception escapes this closure (up to _gather's
-        # try/except), the successes/failures lists are
-        # already populated for this item.
+        # broken on_progress callback must not lose the outcome
+        # tracking — the dispatch's whole point is to return a
+        # complete summary. Notify second so that even if
+        # on_progress raises and the exception escapes this
+        # closure (up to _gather's try/except), the
+        # successes/failures lists are already populated for
+        # this item.
         if status == "ok":
             successes.append(info)
         else:
@@ -614,7 +605,7 @@ def _run_pool(
     log_kind: str,
 ) -> None:
     """Run one batch of items through a ThreadPoolExecutor with
-    per-invocation timeout (chunk 3.11). For each item:
+    per-invocation timeout. For each item:
 
       - `invoke_fn(item)` returns → `on_done(item, "ok", result_dict)`
       - any exception           → `on_done(item, "fail", "ExcType: msg")`
@@ -623,14 +614,11 @@ def _run_pool(
     `dispatch_topo` calls this once per topological level (the
     inheritance-aware level boundary survives in the caller);
     `dispatch_flows` calls it once with the flat entrypoint list.
-    Chunk 3.16's /review I16 extracted the pool plumbing from
-    both dispatchers — it was byte-identical except for the
-    log-kind prefix in the exception path.
 
     Pool uses explicit shutdown(wait=False, cancel_futures=True)
     instead of context manager because the `with` form blocks
-    on hung workers (chunk 3.5 hang). Hung workers are daemon
-    threads and die when the process exits.
+    on hung workers. Hung workers are daemon threads and die
+    when the process exits.
 
     `log_kind` distinguishes log messages between dispatchers
     ("dispatch" vs "flow dispatch"). Kept as a parameter — not
@@ -639,12 +627,9 @@ def _run_pool(
     """
     # Worker-stamped actual start times, keyed by item_id (not
     # Future identity, because the worker thread doesn't know
-    # its own Future). Pre-3.20 the per-invoke deadline was set
-    # at SUBMISSION, so tail items queued behind saturated
-    # workers would burn their entire per_invoke_timeout
-    # budget on queue wait. Now the worker stamps this on
-    # entry; _gather uses it for the deadline check (chunk 3.20
-    # / C-NEW-5).
+    # its own Future). The per-invoke deadline checks against
+    # this so tail items queued behind saturated workers don't
+    # burn their per_invoke_timeout budget on queue wait alone.
     start_times: dict[str, float] = {}
 
     def _try_one(item_id: str) -> tuple[str, Any]:
@@ -695,8 +680,8 @@ def dispatch_topo(
     `per_invoke_timeout` (seconds) bounds each NodeDocumenter
     invocation. Hung invocations are recorded as TimeoutError
     failures after the deadline; the dispatch continues. Default
-    600s = 10 minutes (the chunk 3.5 production hang motivating
-    this was 17 minutes of indefinite block).
+    600s = 10 minutes (motivated by a real 17-minute indefinite
+    block from an early production run).
 
     Per-node exceptions are caught and recorded in `failures`; the
     loop never aborts mid-walk.
@@ -712,15 +697,15 @@ def dispatch_topo(
     should call the tool functions directly with explicit
     `cache_root=` instead of going through dispatch_topo.
 
-    Level-gating limitation (chunk 3.24 / I-NEW-4): the per-level
-    barrier ensures level N+1 only STARTS after every level-N
-    future has been drained from `pending` (via completion or
-    per-invoke timeout). However, `pool.shutdown(wait=False,
-    cancel_futures=True)` lets a per-invoke-timed-out worker keep
-    running in its daemon thread (Python can't kill threads). If
-    the worker's `agent.invoke()` eventually completes — e.g., a
-    hung LLM API call that recovers AFTER the timeout fired — it
-    may write a file to vault AFTER level N+1 has already started.
+    Level-gating limitation: the per-level barrier ensures level
+    N+1 only STARTS after every level-N future has been drained
+    from `pending` (via completion or per-invoke timeout).
+    However, `pool.shutdown(wait=False, cancel_futures=True)`
+    lets a per-invoke-timed-out worker keep running in its daemon
+    thread (Python can't kill threads). If the worker's
+    `agent.invoke()` eventually completes — e.g., a hung LLM API
+    call that recovers AFTER the timeout fired — it may write a
+    file to vault AFTER level N+1 has already started.
 
     Observable effects:
     - The dispatch summary records the node as failed (CORRECT —
@@ -737,8 +722,8 @@ def dispatch_topo(
     recovers in a narrow window. If this becomes a real
     production issue, change `wait=False` → `wait=True` in
     `_run_pool`'s shutdown call, accepting that the dispatcher
-    will block until all workers complete (re-introducing the
-    chunk 3.5 hang exposure).
+    will block until all workers complete (re-introducing hang
+    exposure).
 
     Returns:
         {
@@ -809,18 +794,6 @@ def dispatch_topo(
     }
 
 
-def _invoke_one_flow(
-    agent: Any, graph_id: str, entrypoint_id: str, vault_path: str
-) -> dict[str, Any]:
-    """Thin wrapper for FlowTracer dispatch (chunk 3.16). Routes
-    to `_invoke_one` with the flow-tracing task template; kept
-    as a named function so `dispatch_flows` reads clearly and the
-    chunk 3.14 validation test pattern stays unchanged."""
-    return _invoke_one(
-        agent, graph_id, entrypoint_id, vault_path, _FLOW_TRACE_TEMPLATE
-    )
-
-
 def dispatch_flows(
     graph_id: str,
     vault_path: str,
@@ -846,11 +819,10 @@ def dispatch_flows(
     `per_invoke_timeout` (seconds) bounds each FlowTracer
     invocation. Hung invocations are recorded as TimeoutError
     failures after the deadline; the dispatch continues. See
-    `dispatch_topo` for the rationale (chunk 3.11 / chunk 3.5
-    hang).
+    `dispatch_topo` for the underlying rationale.
 
-    `entrypoint_filter` (chunk 3.15) is an optional callable that
-    scopes the dispatch to a subset of the attack surface.
+    `entrypoint_filter` is an optional callable that scopes the
+    dispatch to a subset of the attack surface.
     Applied AFTER `attack_surface()` and BEFORE
     `skip_leaf_entrypoints`, so callers can pre-narrow without
     losing the leaf filter or compose both for selective runs.
@@ -912,7 +884,9 @@ def dispatch_flows(
     # level-gating (unlike dispatch_topo's inheritance-aware walk).
     _run_pool(
         order,
-        lambda eid: _invoke_one_flow(agent, graph_id, eid, vault_path),
+        lambda eid: _invoke_one(
+            agent, graph_id, eid, vault_path, _FLOW_TRACE_TEMPLATE
+        ),
         concurrency_cap=concurrency_cap,
         per_invoke_timeout=per_invoke_timeout,
         on_done=record,

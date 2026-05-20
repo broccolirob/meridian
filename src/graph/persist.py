@@ -11,15 +11,14 @@ from trailmark.query.api import QueryEngine
 CACHE_ROOT = Path(".washable/graph")
 
 # Module-level lock that serializes _load_graph_cached
-# invocations (chunk 3.25 / I-NEW-5). CPython's lru_cache is
-# thread-safe for the cache MAP but does NOT serialize the
-# wrapped function call on a miss — two concurrent callers on
-# the same key both enter pickle.load, and the loser's
-# instance is held briefly by its caller while the cache
-# stores the winner's. This lock makes concurrent misses
-# deterministic: only one pickle.load per (graph_id,
-# mtime_ns), and all concurrent callers receive the same
-# cached instance.
+# invocations. CPython's lru_cache is thread-safe for the
+# cache MAP but does NOT serialize the wrapped function call
+# on a miss — two concurrent callers on the same key both
+# enter pickle.load, and the loser's instance is held briefly
+# by its caller while the cache stores the winner's. This
+# lock makes concurrent misses deterministic: only one
+# pickle.load per (graph_id, mtime_ns), and all concurrent
+# callers receive the same cached instance.
 #
 # Cost: hit lookups also acquire the lock, but hits run in
 # microseconds — contention is negligible at washable's
@@ -54,9 +53,9 @@ def save_parse_root(
 ) -> Path:
     """Persist the absolute `parse_root` alongside the engine.
 
-    Chunk 3.26 / I-NEW-7: `read_node_source` validates that
-    file paths it reads are under this root, defending against
-    symlinked exfiltration (e.g., an adversarial repo planting
+    `read_node_source` validates that file paths it reads are
+    under this root, defending against symlinked exfiltration
+    (e.g., an adversarial repo planting
     `evil.sol -> /etc/passwd`).
 
     The file is written to `cache_root/<gid>/parse_root.txt`
@@ -79,10 +78,9 @@ def load_parse_root(
     """Return the absolute `parse_root` saved alongside
     `engine.pkl`, or None if not set (legacy graphs).
 
-    Chunk 3.26 / I-NEW-7: the None return preserves backward-
-    compat — pre-3.26 caches have no parse_root.txt; callers
-    that need the validation should treat None as "skip the
-    check" (current behavior) rather than "reject".
+    The None return preserves backward-compat — legacy caches
+    have no parse_root.txt; callers that need the validation
+    should treat None as "skip the check" rather than "reject".
     """
     _validate_graph_id(graph_id)
     parse_root_file = Path(cache_root) / graph_id / "parse_root.txt"
@@ -146,24 +144,23 @@ def load_graph(
 ) -> QueryEngine:
     """Load the persisted QueryEngine for `graph_id`.
 
-    Memoized via an mtime-aware lru_cache (chunk 3.12): identical
-    (graph_id, cache_root) pairs return the SAME in-process
-    QueryEngine instance until the underlying file is rewritten
-    by save_graph. Chunk 0.3's atomic os.replace bumps mtime
-    atomically with the rename, so cache invalidation is automatic
-    — no cache_clear() call needed at the writer.
+    Memoized via an mtime-aware lru_cache: identical (graph_id,
+    cache_root) pairs return the SAME in-process QueryEngine
+    instance until the underlying file is rewritten by
+    save_graph. save_graph's atomic os.replace bumps mtime
+    atomically with the rename, so cache invalidation is
+    automatic — no cache_clear() call needed at the writer.
 
-    Cache size: 4 entries (see _load_graph_cached). Sufficient for
-    the common case (one graph per dispatch); rare cross-tier
-    sessions evict in LRU order.
+    Cache size: 4 entries (see _load_graph_cached). Sufficient
+    for the common case (one graph per dispatch); rare cross-
+    tier sessions evict in LRU order.
 
     Concurrency: _ANNOTATE_LOCK in src/tools.py serializes the
     only mutator path. _LOAD_LOCK (this module) serializes
     cache misses so concurrent readers on a cold cache get the
-    SAME instance, not divergent copies — chunk 3.25 / I-NEW-5.
-    Concurrent readers without writes see the same cached
-    instance; readers that arrive after a write get the fresh
-    mtime → cache miss.
+    SAME instance, not divergent copies. Readers without writes
+    see the same cached instance; readers that arrive after a
+    write get the fresh mtime → cache miss.
 
     Raises:
         ValueError: if `graph_id` doesn't match the 12-hex pattern.
@@ -181,6 +178,6 @@ def load_graph(
     mtime_ns = engine_path.stat().st_mtime_ns
     # Serialize cache access — hits are ~10us, the lock cost
     # is microseconds, and concurrent misses become
-    # deterministic (chunk 3.25 / I-NEW-5).
+    # deterministic (no thundering herd).
     with _LOAD_LOCK:
         return _load_graph_cached(graph_id, cache_root, mtime_ns)

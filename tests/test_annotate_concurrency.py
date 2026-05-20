@@ -1,15 +1,13 @@
-"""Regression armor for chunk 3.18 (C-NEW-3): writer-side
-deepcopy prevents concurrent readers from observing partial
-mutations.
+"""Regression armor: writer-side deepcopy prevents concurrent
+readers from observing partial mutations.
 
-The bug: load_graph's lru_cache returns the same QueryEngine
-instance to all workers. Pre-3.18, annotate() mutated that
-shared instance in-place. Concurrent unlocked readers
-(get_node, nodes_with_annotation, attack_surface, etc.)
-iterated the same engine's internal dicts mid-mutation,
-hitting RuntimeError: dictionary changed size during
-iteration (and even when not raising, observing partial
-state).
+The bug being armored against: load_graph's lru_cache returns
+the same QueryEngine instance to all workers. Without
+deepcopy, annotate() mutating that shared instance in-place
+would race with concurrent unlocked readers (get_node,
+nodes_with_annotation, attack_surface, etc.) iterating the
+same engine's internal dicts — RuntimeError: dictionary
+changed size during iteration, or observing partial state.
 
 The fix: copy.deepcopy(load_graph(...)) before mutating. The
 shared cached instance stays untouched; save_graph below bumps
@@ -29,8 +27,9 @@ def test_annotate_does_not_mutate_cached_engine_instance(
 ):
     """Deterministic: holding a reference to the cached engine
     BEFORE annotate() runs, the reference's internal state
-    must be unchanged AFTER. Pre-3.18 the cached instance
-    would have the new annotation mutated in-place."""
+    must be unchanged AFTER. Without the deepcopy guard, the
+    cached instance would have the new annotation mutated
+    in-place — readers iterating it would race."""
     gid = tier0_graph_id_default_cache
     # Pre-populate cache + snapshot annotations.
     engine = load_graph(gid)
@@ -42,8 +41,8 @@ def test_annotate_does_not_mutate_cached_engine_instance(
     # a fresh instance each time).
     assert engine is load_graph(gid), (
         "test setup: load_graph should return the same cached "
-        "instance on repeated calls — chunk 3.16 C6 lru_cache "
-        "should be hot."
+        "instance on repeated calls — the lru_cache should be "
+        "hot."
     )
 
     # Run a write that would have mutated the shared instance
@@ -52,7 +51,7 @@ def test_annotate_does_not_mutate_cached_engine_instance(
         gid,
         target,
         "assumption",
-        "regression armor: chunk 3.18 deepcopy test",
+        "regression armor: deepcopy test",
         source="test",
     )
 
@@ -62,7 +61,7 @@ def test_annotate_does_not_mutate_cached_engine_instance(
         "annotate() mutated the cached engine instance — "
         "concurrent readers would observe partial state. "
         "Check that annotate() uses copy.deepcopy before "
-        "mutating (chunk 3.18 C-NEW-3 fix)."
+        "mutating."
     )
 
     # Sanity: the SAVED state has the new annotation. Confirm
@@ -122,10 +121,10 @@ def test_concurrent_readers_and_writers_no_iteration_race(
     tier0_graph_id_default_cache,
 ):
     """Stress test: K reader threads iterate the annotations
-    dict while 1 writer thread mutates. Pre-3.18 this would
-    eventually raise RuntimeError: dictionary changed size
-    during iteration. Post-3.18 the writer's deepcopy means
-    readers iterate an unchanging dict, so no error.
+    dict while 1 writer thread mutates. Without the writer's
+    deepcopy, this would eventually raise RuntimeError:
+    dictionary changed size during iteration. With the
+    deepcopy, readers iterate an unchanging dict — no error.
 
     Bounded duration (1.5s) so the test is fast in CI. The
     deterministic tests above are the primary armor; this is

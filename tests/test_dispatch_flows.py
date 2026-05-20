@@ -120,12 +120,12 @@ def test_dispatch_flows_rejects_zero_or_negative_cap(
             )
 
 
-# --- per-invocation timeout (chunk 3.11) -----------------------------
+# --- per-invocation timeout ------------------------------------------
 
 
 class _HangingAgent:
     """Same pattern as test_dispatch._HangingAgent — agent
-    whose invoke() blocks forever to simulate the chunk 3.5 hang."""
+    whose invoke() blocks forever to simulate an LLM hang."""
 
     def __init__(self, block_signal: threading.Event):
         self._lock = threading.Lock()
@@ -144,7 +144,7 @@ def test_dispatch_flows_per_invoke_timeout_records_failure(
 ):
     """Same as dispatch_topo's timeout test — hung agent.invoke()
     must be recorded as a timeout failure after per_invoke_timeout
-    seconds. Mirrors the chunk 3.5 hang pattern at the flows
+    seconds. Mirrors the hang-protection pattern at the flows
     dispatch level."""
     gid = tier0_graph_id_default_cache
     block = threading.Event()
@@ -189,18 +189,25 @@ def test_dispatch_flows_rejects_zero_or_negative_per_invoke_timeout(
             )
 
 
-def test_invoke_one_flow_validates_entrypoint_id():
-    """Same allowlist applies to FlowTracer's entrypoint_id
-    (chunk 3.14)."""
-    from src.agent import _invoke_one_flow
+def test_invoke_one_validates_entrypoint_id_via_flow_template():
+    """Same allowlist applies when _invoke_one is called with
+    the FlowTracer task template. Confirms _validate_node_id
+    fires regardless of which template is used."""
+    from src.agent import _FLOW_TRACE_TEMPLATE, _invoke_one
 
     fake_agent = object()
     for bad in ("back`tick", "new\nline", "", "space x"):
         with pytest.raises(ValueError, match="invalid node_id"):
-            _invoke_one_flow(fake_agent, "abc012345678", bad, "/v")
+            _invoke_one(
+                fake_agent,
+                "abc012345678",
+                bad,
+                "/v",
+                _FLOW_TRACE_TEMPLATE,
+            )
 
 
-# --- entrypoint_filter (chunk 3.15) --------------------------------
+# --- entrypoint_filter -----------------------------------------------
 
 
 def test_dispatch_flows_entrypoint_filter_narrows_dispatch(
@@ -309,7 +316,7 @@ def test_dispatch_flows_empty_filter_dispatches_nothing(
     assert len(fake.calls) == 0
 
 
-# --- concurrency at cap=5 (chunk 3.16) ----------------------------
+# --- concurrency at cap=5 --------------------------------------------
 
 
 def test_dispatch_flows_uses_concurrency_at_cap_5(
@@ -382,22 +389,20 @@ def test_dispatch_flows_uses_concurrency_at_cap_5(
     )
 
 
-# --- dispatch_flows on_progress armor (chunk 3.23 / I-NEW-2) ---
+# --- dispatch_flows on_progress armor --------------------------------
 
 
 def test_dispatch_flows_on_progress_callback_contract(
     monkeypatch, tier0_graph_id_default_cache
 ):
-    """Chunk 3.23 / I-NEW-2: parallel armor for
-    dispatch_flows. dispatch_flows and dispatch_topo share
-    `_make_recorder` but each builds its own recorder
-    instance — this test pins flows' wiring independently
-    (a future refactor that broke flows' wiring while
-    leaving topo's intact would slip past the topo armor).
+    """Parallel armor for dispatch_flows. dispatch_flows and
+    dispatch_topo share `_make_recorder` but each builds its
+    own recorder instance — this test pins flows' wiring
+    independently. A future refactor that broke flows' wiring
+    while leaving topo's intact would slip past the topo armor.
 
-    Same three sub-properties as the dispatch_topo
-    on_progress test: signature, monotonic idx, constant
-    total."""
+    Same three sub-properties as the dispatch_topo on_progress
+    test: signature, monotonic idx, constant total."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr(

@@ -24,15 +24,12 @@ def transfer_method(tier0_graph_id):
 def stub_graph_dependencies(monkeypatch):
     """Stub the graph-touching helpers used by
     `render_and_write_node_note` so tests can exercise the
-    routing/template logic without relying on the silent
-    `except Exception` fallbacks in the diagram block (chunk
-    3.5) and the disambiguation block (chunk 3.10).
+    routing/template logic without depending on the diagram
+    block's or disambiguation block's narrow-except fallbacks.
 
-    Pre-3.16 the routing tests passed a fake graph_id and
-    depended on both fallbacks firing silently. If a future
-    cleanup narrows either `except Exception`, the routing
-    tests would all fail without the routing logic itself
-    having regressed. This fixture decouples those tests."""
+    Decouples routing tests from the graph-loading code path,
+    so a future cleanup that narrows or widens either except
+    tuple doesn't accidentally break routing."""
     monkeypatch.setattr(
         "src.render.obsidian.list_nodes",
         lambda *a, **k: [],  # no collisions → bare path
@@ -159,7 +156,7 @@ def test_render_and_write_routes_by_kind(
     """KIND_TO_FOLDER routing for every Trailmark node kind.
     Uses `stub_graph_dependencies` so the test exercises the
     real routing logic without depending on the silent
-    `except Exception` fallbacks (chunk 3.16, /review I6)."""
+    fallbacks in the diagram or disambiguation blocks."""
     fake_node = {
         "id": f"src.fake:{name}",
         "name": name,
@@ -221,7 +218,7 @@ def test_render_and_write_produces_canonical_template(
         assert heading in text, f"missing {heading}"
 
 
-# --- diagram embedding (chunk 3.5) -----------------------------------
+# --- diagram embedding -----------------------------------------------
 
 
 def test_render_and_write_embeds_inheritance_diagram(
@@ -272,7 +269,7 @@ def test_diagrams_appear_above_link_lists(
     assert inheritance_diag_pos < call_graph_pos < inherits_list_pos
 
 
-# --- C2: filename disambiguation on collision (chunk 3.10) -------
+# --- filename disambiguation on collision ----------------------------
 
 
 def test_node_note_qualifies_filename_on_bare_name_collision(
@@ -335,7 +332,7 @@ def test_resolve_wikilink_returns_bare_path_when_no_collision(
     assert link == "[[contracts/ERC20|ERC20]]"
 
 
-# --- silent-fallback regression armor (chunk 3.16, /review I6) ------
+# --- silent-fallback regression armor --------------------------------
 
 
 def test_render_and_write_logs_warning_when_graph_unavailable(
@@ -346,12 +343,11 @@ def test_render_and_write_logs_warning_when_graph_unavailable(
     and ships the note without diagrams. The disambiguation block
     similarly falls back to the bare path.
 
-    The routing tests above use `stub_graph_dependencies` so they
-    DON'T depend on this fallback — but the fallback itself is
-    still real behavior we ship. This test pins it independently
-    so a future refactor that drops the safety net (e.g.,
-    narrowing `except Exception` per /review I17) surfaces here,
-    not via mysterious failures in the routing tests."""
+    The routing tests above use `stub_graph_dependencies` so
+    they DON'T depend on this fallback — but the fallback
+    itself is still real behavior we ship. This test pins it
+    independently so a future refactor that drops the safety
+    net surfaces here, not via mysterious routing-test failures."""
     import logging
 
     caplog.set_level(logging.WARNING, logger="src.render.obsidian")
@@ -366,9 +362,9 @@ def test_render_and_write_logs_warning_when_graph_unavailable(
     assert Path(out).exists()
     assert out.endswith("/contracts/ERC20.md")
 
-    # Warning fired for the diagram failure (chunk 3.5) AND/OR
-    # the disambiguation failure (chunk 3.10). Either logged
-    # message indicates the fallback engaged.
+    # Warning fired for the diagram failure AND/OR the
+    # disambiguation failure. Either logged message indicates
+    # the fallback engaged.
     warnings = [r.getMessage() for r in caplog.records]
     assert any(
         "diagram computation failed" in m
@@ -381,17 +377,16 @@ def test_render_and_write_logs_warning_when_graph_unavailable(
     assert "```mermaid" not in text
 
 
-# --- narrowed-except regression armor (chunk 3.16, /review I17) -----
+# --- narrowed-except regression armor --------------------------------
 
 
 def test_diagram_block_propagates_coding_bugs(
     erc20_contract, tmp_path, monkeypatch
 ):
-    """Chunk 3.16 I17: the diagram block now catches only
-    KeyError/FileNotFoundError/ValueError (expected graph-lookup
-    failures). TypeError from a coding bug must propagate — pre-
-    3.16 the broad `except Exception` would have swallowed it
-    silently and shipped a diagram-less note, hiding the
+    """The diagram block's narrow except catches expected
+    graph-lookup failures. TypeError from a coding bug must
+    propagate — a broad `except Exception` would swallow it
+    silently and ship a diagram-less note, hiding the
     regression."""
 
     def _raise_type_error(*args, **kwargs):
@@ -421,10 +416,10 @@ def test_diagram_block_propagates_coding_bugs(
 def test_disambiguation_block_propagates_coding_bugs(
     erc20_contract, tmp_path, monkeypatch
 ):
-    """Chunk 3.16 I17: same narrowing applied to the
-    disambiguation block. AttributeError from a coding bug in
-    `_disambiguated_path` propagates instead of silently
-    falling back to the bare path."""
+    """Same narrowing principle applied to the disambiguation
+    block. AttributeError from a coding bug in
+    `_disambiguated_path` propagates instead of silently falling
+    back to the bare path."""
 
     def _raise_attribute_error(*args, **kwargs):
         raise AttributeError("simulated coding bug in _disambiguated_path")
@@ -454,16 +449,15 @@ def test_disambiguation_block_propagates_coding_bugs(
         )
 
 
-# --- _pick_primary_method direct unit tests (chunk 3.16, /review I10) ---
+# --- _pick_primary_method direct unit tests --------------------------
 #
-# Pre-3.16 only exercised indirectly through the diagram block in
-# `render_and_write_node_note`. The diagram block's narrowed
-# `except (KeyError, FileNotFoundError, ValueError)` (chunk 3.16
-# I17) would swallow logic bugs that don't raise — e.g., a wrong
-# tiebreak direction would silently pick the wrong method without
-# any test failing. Direct tests on a synthetic `list_nodes`
-# response give explicit control of CC values, names, and the
-# ID-prefix relationship.
+# Only exercised indirectly through the diagram block in
+# `render_and_write_node_note`. Logic bugs in `_pick_primary_method`
+# that don't raise (e.g., a wrong tiebreak direction) would
+# silently pick the wrong method without any other test failing.
+# Direct tests on a synthetic `list_nodes` response give
+# explicit control of CC values, names, and the ID-prefix
+# relationship.
 
 
 def test_pick_primary_method_returns_none_when_no_methods(monkeypatch):
@@ -650,7 +644,7 @@ def test_pick_primary_method_requires_dot_separator(monkeypatch):
     assert _pick_primary_method("abc012345678", "src.X:X") is None
 
 
-# --- widened-except for legitimate cache failures (chunk 3.21 / C-NEW-6) ---
+# --- widened-except for legitimate cache failures --------------------
 
 
 @pytest.mark.parametrize(
@@ -661,18 +655,12 @@ def test_pick_primary_method_requires_dot_separator(monkeypatch):
 def test_diagram_block_recovers_from_load_graph_failures(
     erc20_contract, tmp_path, monkeypatch, exc
 ):
-    """Chunk 3.21 / C-NEW-6: chunk 3.16 I17's narrowed catch
-    tuple was too restrictive. load_graph can raise EOFError
+    """The diagram block's narrow-except tuple must include
+    legitimate filesystem failures from load_graph: EOFError
     (torn pickle), pickle.UnpicklingError (corrupted cache),
-    or OSError (NFS hiccup, permission denied) — all
-    legitimate filesystem failures that the diagram block
-    should recover from gracefully, not propagate.
-
-    Pre-3.21 these exceptions aborted the entire writer; the
-    dispatcher recorded the node as failed. Post-3.21 the
-    catch tuple is widened to include them, so the note
-    ships with no diagrams (the chunk 3.5 design's
-    fallback)."""
+    OSError (NFS hiccup, permission denied). These should
+    degrade gracefully (note ships without diagrams), not
+    propagate up and abort the entire writer."""
     def _raise(*args, **kwargs):
         raise exc(f"simulated {exc.__name__}")
 
@@ -732,9 +720,9 @@ def test_disambiguation_block_recovers_from_load_graph_failures(
 ):
     """Same widening for the filename-disambiguation block —
     if `_disambiguated_path` raises an OSError / EOFError /
-    UnpicklingError (via its `list_nodes` → `load_graph`
-    call chain), fall back to the bare path. Pre-3.21 these
-    aborted the writer."""
+    UnpicklingError (via its `list_nodes` → `load_graph` call
+    chain), fall back to the bare path rather than aborting
+    the writer."""
     def _raise(*args, **kwargs):
         raise exc(f"simulated {exc.__name__}")
 

@@ -72,8 +72,9 @@ def test_render_and_write_flow_note_produces_valid_note(
         cache_root=cache_root,
     )
 
-    # Chunk 3.10: filename qualified with containing contract
-    # (UniswapV2Pair.swap, not bare swap).
+    # Filename qualified with containing contract (so
+    # UniswapV2Pair.swap, not bare swap, when other contracts
+    # also expose a `swap` entrypoint).
     assert out.endswith("/flows/UniswapV2Pair.swap.md")
     text = Path(out).read_text()
     # Frontmatter shape
@@ -90,7 +91,7 @@ def test_render_and_write_flow_note_produces_valid_note(
     assert "## Observations" in text
     assert "obs one" in text
     assert "obs two" in text
-    # Chunk 3.9: per-path Hops list with method-level wikilinks
+    # Per-path Hops list with method-level wikilinks.
     assert text.count("**Hops:**") == 2  # one per path
     assert "[[contracts/UniswapV2Pair|UniswapV2Pair.swap]]" in text
     assert (
@@ -135,10 +136,10 @@ def test_render_and_write_flow_note_empty_paths_emits_placeholder(
 def test_flow_note_filename_qualified_with_contract(
     tier1_graph_id, tmp_path
 ):
-    """Chunk 3.10: two Tier 1 entrypoints sharing the bare name
-    `swap` (UniswapV2Pair.swap and IUniswapV2Pair.swap on the
-    attack surface) must produce distinct files. Without
-    qualification the second write would silently overwrite
+    """Two Tier 1 entrypoints sharing the bare name `swap`
+    (UniswapV2Pair.swap and IUniswapV2Pair.swap on the attack
+    surface) must produce distinct files. Without qualification
+    the second write would silently overwrite
     the first."""
     from src.render.obsidian import render_and_write_flow_note
     from src.tools import get_node
@@ -172,14 +173,14 @@ def test_flow_note_filename_qualified_with_contract(
     assert Path(out_b).exists()
 
 
-# --- per-path render failure (chunk 3.16, /review I8) -----------------
+# --- per-path render failure -----------------------------------------
 
 
 def test_render_and_write_flow_note_continues_past_bad_path(
     tier1_graph_id, tmp_path, caplog
 ):
     """One bad path in a multi-path list must NOT abort the
-    flow note. The chunk 3.7 design adds an inline
+    flow note. The design adds an inline
     `_Sequence diagram unavailable_` placeholder + warning so
     the dispatch loop can still ship a partial note.
 
@@ -189,9 +190,9 @@ def test_render_and_write_flow_note_continues_past_bad_path(
       2. `resolve_wikilink` raises KeyError for an individual
          hop → backticked bare-name fallback in Hops list.
 
-    Pre-3.16 neither branch was tested — a regression that
-    re-raised instead of falling back would silently break
-    dispatch_flows for any flow containing one bad path."""
+    Armors against a regression that re-raises instead of
+    falling back, which would silently break dispatch_flows for
+    any flow containing one bad path."""
     import logging
 
     from src.render.obsidian import render_and_write_flow_note
@@ -263,13 +264,13 @@ def test_render_and_write_flow_note_continues_past_bad_path(
 def test_sequence_render_propagates_coding_bugs(
     tier1_graph_id, tmp_path, monkeypatch
 ):
-    """Chunk 3.16 I17: the per-path sequence-render block now
-    catches only KeyError/FileNotFoundError/ValueError. Expected
-    per-path failures (bad node ID → KeyError) still produce
-    inline placeholders so partial flow notes ship (the chunk
-    3.16 I8 design); coding bugs (TypeError, AttributeError)
-    propagate up so they surface in dispatch_flows's failure
-    recorder instead of being silently swallowed mid-flow."""
+    """The per-path sequence-render block's narrow except
+    catches expected per-path failures (bad node ID →
+    KeyError, missing graph cache → FileNotFoundError, etc.)
+    so partial flow notes still ship. Coding bugs (TypeError,
+    AttributeError) propagate up so they surface in
+    dispatch_flows's failure recorder instead of being
+    silently swallowed mid-flow."""
     import pytest
 
     from src.render.obsidian import render_and_write_flow_note
@@ -305,7 +306,7 @@ def test_sequence_render_propagates_coding_bugs(
         )
 
 
-# --- widened-except for legitimate cache failures (chunk 3.21 / C-NEW-6) ---
+# --- widened-except for legitimate cache failures --------------------
 
 
 @pytest.mark.parametrize(
@@ -316,12 +317,12 @@ def test_sequence_render_propagates_coding_bugs(
 def test_sequence_render_recovers_from_load_graph_failures(
     tier1_graph_id, tmp_path, monkeypatch, exc
 ):
-    """Chunk 3.21 / C-NEW-6: per-path sequence rendering's
-    narrowed catch tuple was too restrictive. With one path
-    failing due to a load_graph-style exception, the flow
-    note must still ship with an inline placeholder for that
-    path. Pre-3.21 EOFError / OSError / UnpicklingError
-    aborted the entire flow-note write."""
+    """Per-path sequence rendering's narrow catch tuple must
+    include legitimate load_graph-style exceptions (EOFError,
+    OSError, UnpicklingError). With one path failing on one
+    of these, the flow note must still ship with an inline
+    placeholder for that path rather than aborting the entire
+    flow-note write."""
     from src.render.obsidian import render_and_write_flow_note
     from src.tools import get_node
 

@@ -47,10 +47,9 @@ def test_dispatch_includes_node_id_in_task(
     monkeypatch, tier0_graph_id_default_cache
 ):
     """Task message uses the "Document the node `<id>`" verb the
-    main prompt steers on. After chunk 3.16's I15 refactor
-    (template parameterization), the verb is also coupling armor
-    — if the template gets swapped with the FlowTracer template,
-    this test catches it."""
+    main prompt steers on. Also coupling armor — if the template
+    gets swapped with the FlowTracer template, this test catches
+    it."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
@@ -117,14 +116,14 @@ def test_dispatch_order_field_matches_topo_order(
     assert result["order"] == expected
 
 
-# --- per-invocation timeout (chunk 3.11) -----------------------------
+# --- per-invocation timeout ------------------------------------------
 
 
 class _HangingAgent:
     """Stand-in agent whose invoke() blocks on an event forever.
 
-    Use to simulate the chunk 3.5 hang pattern in tests without
-    real LLM calls."""
+    Use to simulate a hung LLM call in tests without real LLM
+    invocations."""
 
     def __init__(self, block_signal: threading.Event):
         self._lock = threading.Lock()
@@ -143,8 +142,7 @@ def test_dispatch_per_invoke_timeout_records_failure(
 ):
     """A hung LLM call must NOT block the orchestrator. After
     per_invoke_timeout seconds the future is recorded as a
-    failure and dispatch_topo returns. Pre-3.11 this would hang
-    forever (chunk 3.5 pattern reproducible here)."""
+    failure and dispatch_topo returns."""
     gid = tier0_graph_id_default_cache
     block = threading.Event()  # never set during test
     hanging = _HangingAgent(block)
@@ -191,7 +189,7 @@ def test_dispatch_rejects_zero_or_negative_per_invoke_timeout(
             )
 
 
-# --- node_id allowlist validation (chunk 3.14) ----------------------
+# --- node_id allowlist validation ------------------------------------
 
 
 def test_invoke_one_validates_node_id():
@@ -234,24 +232,20 @@ def test_invoke_one_accepts_real_trailmark_ids():
         _validate_node_id(nid)  # must not raise
 
 
-# --- broken on_progress / on_done callback resilience (chunk 3.19) ---
+# --- broken on_progress / on_done callback resilience ---------------
 
 
 def test_dispatch_continues_when_on_progress_callback_raises(
     monkeypatch, tier0_graph_id_default_cache, caplog
 ):
-    """Chunk 3.19 /review C-NEW-4: a broken on_progress callback
-    must NOT abort the dispatch run. Pre-3.19 the callback's
-    exception propagated out of `_gather_with_per_invoke_timeout`
-    → out of `_run_pool` → out of `dispatch_topo`, abandoning
-    in-flight workers and dropping every node's failure record.
-    Post-3.19 the gather loop catches on_done exceptions, logs
-    them via _log.exception, and continues to drain.
+    """A broken on_progress callback must NOT abort the dispatch
+    run. The gather loop catches on_done exceptions, logs them
+    via _log.exception, and continues to drain.
 
     Production scenario: a notebook user's progress bar writes
     to a closed stderr (Jupyter kernel restart, broken pipe);
-    the dispatch must still complete and the user gets the
-    full result summary."""
+    the dispatch must still complete and the user gets the full
+    result summary."""
     import logging
 
     gid = tier0_graph_id_default_cache
@@ -297,14 +291,10 @@ def test_dispatch_continues_when_on_progress_callback_raises(
 
 def test_gather_logs_and_continues_when_on_done_raises():
     """Direct unit test of `_gather_with_per_invoke_timeout`:
-    if on_done raises for every future, the gather loop
-    must drain all futures, log each failure, and return —
-    not raise, not hang.
-
-    Pre-3.19 the function aborted with an uncaught exception
-    after the first on_done failure (in the completion
-    branch's recovery path). Post-3.19 every future is
-    drained from pending in `finally` even if on_done blew up."""
+    if on_done raises for every future, the gather loop must
+    drain all futures, log each failure, and return — not
+    raise, not hang. Every future is drained from pending in
+    `finally` even if on_done blew up."""
     import time
     from concurrent.futures import ThreadPoolExecutor
 
@@ -358,28 +348,27 @@ def test_gather_logs_and_continues_when_on_done_raises():
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-# --- worker-time per-invoke deadline (chunk 3.20 / C-NEW-5) ---
+# --- worker-time per-invoke deadline ---------------------------------
 
 
 def test_per_invoke_timeout_does_not_count_queue_wait():
-    """Chunk 3.20 / C-NEW-5: tail items in a saturated pool
-    must NOT consume their per_invoke_timeout while queued.
-    Pre-3.20 the deadline was stamped at submission, so any
-    item queued for > per_invoke_timeout seconds before its
-    worker started would be marked TimeoutError despite
-    never having run.
+    """Tail items in a saturated pool must NOT consume their
+    per_invoke_timeout while queued. The deadline is keyed off
+    actual worker start time (stamped by `_try_one`), not
+    submission time — so items queued for > per_invoke_timeout
+    seconds before their worker started don't get marked as
+    spurious TimeoutErrors.
 
     Test setup: 30 items × 80ms work × cap=5 ×
     per_invoke_timeout=0.4s. The tail (items 21-30) finish
-    queue+work past their 0.4s submission deadline. Pre-3.20
-    they fail with TimeoutError; post-3.20 they all succeed
-    because their workers' per-invoke clocks start when
-    execution actually begins.
+    queue+work past their 0.4s submission deadline; the test
+    asserts they all succeed because their workers' per-invoke
+    clocks start when execution actually begins.
 
     Production scenario this armor protects: Tier-2 codebase
-    with 80 entrypoints × cap=5 × 60s avg runtime, where
-    items 50+ would spuriously time out under submission-
-    time accounting."""
+    with 80 entrypoints × cap=5 × 60s avg runtime, where items
+    50+ would spuriously time out under submission-time
+    accounting."""
     import time
     from typing import Any
 
@@ -409,31 +398,29 @@ def test_per_invoke_timeout_does_not_count_queue_wait():
     failed = sum(1 for s in statuses.values() if s == "fail")
 
     assert succeeded == 30, (
-        f"expected all 30 items to succeed under post-3.20 "
-        f"worker-time deadline accounting; got "
-        f"{succeeded} succeed, {failed} fail. Pre-3.20 the "
-        f"queue-wait of items 21-30 would consume their "
-        f"per_invoke_timeout before workers picked them up."
+        f"expected all 30 items to succeed under worker-time "
+        f"deadline accounting; got {succeeded} succeed, "
+        f"{failed} fail. The queue-wait of items 21-30 should "
+        f"not consume their per_invoke_timeout before workers "
+        f"pick them up."
     )
 
 
 def test_pool_deadlock_detector_marks_queued_when_workers_hang():
-    """Chunk 3.20 / C-NEW-5: when running workers hang AND
-    queued items can't make progress, the gather loop's
-    deadlock detector marks them as failed after
-    2× per_invoke_timeout of no progress. Without the
-    detector, dispatch would loop forever (queued items
+    """When running workers hang AND queued items can't make
+    progress, the gather loop's deadlock detector marks them as
+    failed after 2× per_invoke_timeout of no progress. Without
+    the detector, dispatch would loop forever (queued items
     have no per-invoke deadline; running items are hung).
 
-    This test exercises `_run_pool` DIRECTLY with synthetic
-    hanging items so the per-invoke vs deadlock split is
-    deterministic (cap=2 + 8 items = exactly 2 per-invoke +
-    6 deadlock). The end-to-end chunk 3.11 hang test
-    (`test_dispatch_per_invoke_timeout_records_failure`)
-    goes through dispatch_topo's level loop, where each
-    level creates a fresh pool — the per-level split varies
-    with tier 0's topology and isn't a good unit-level
-    contract."""
+    Exercises `_run_pool` DIRECTLY with synthetic hanging items
+    so the per-invoke vs deadlock split is deterministic
+    (cap=2 + 8 items = exactly 2 per-invoke + 6 deadlock). The
+    end-to-end
+    `test_dispatch_per_invoke_timeout_records_failure` test
+    goes through dispatch_topo's level loop, where each level
+    creates a fresh pool — the per-level split varies with
+    tier 0's topology and isn't a good unit-level contract."""
     import threading
     import time
     from typing import Any
@@ -495,7 +482,7 @@ def test_pool_deadlock_detector_marks_queued_when_workers_hang():
         )
 
         # All messages contain the contract substrings the
-        # chunk 3.11 hang test asserts.
+        # the hang test asserts.
         for _, _, info in results:
             assert "TimeoutError" in info
             assert "per_invoke_timeout" in info
@@ -503,15 +490,15 @@ def test_pool_deadlock_detector_marks_queued_when_workers_hang():
         block.set()
 
 
-# --- graph_id + vault_path prompt-boundary validation (chunk 3.22 / C-NEW-7) ---
+# --- graph_id + vault_path prompt-boundary validation ----------------
 
 
 def test_invoke_one_validates_graph_id():
-    """Chunk 3.22 / C-NEW-7: _invoke_one validates graph_id
-    at the LLM trust boundary. graph_id is interpolated into
-    the task template; injection chars (backticks, newlines)
-    would forge LLM instructions. Reuses _validate_graph_id
-    from persist.py (strict 12-hex allowlist)."""
+    """_invoke_one validates graph_id at the LLM trust
+    boundary. graph_id is interpolated into the task template;
+    injection chars (backticks, newlines) would forge LLM
+    instructions. Reuses `_validate_graph_id` from persist.py
+    (strict 12-hex allowlist)."""
     from src.agent import _invoke_one
 
     fake_agent = object()
@@ -610,30 +597,27 @@ def test_build_agent_validates_vault_path(monkeypatch):
     )
 
 
-# --- dispatch_topo level-gating + on_progress armor (chunk 3.23) ---
+# --- dispatch_topo level-gating + on_progress armor ------------------
 
 
 def test_dispatch_topo_completes_level_before_next_starts(
     monkeypatch, tier0_graph_id_default_cache
 ):
-    """Chunk 3.23 / I-NEW-1: dispatch_topo's
-    `for level in levels: _run_pool(...)` structure
-    guarantees that level N+1 starts only AFTER level N
-    completes. This keeps wikilink targets on disk before
-    derived contracts are documented (chunk 3.5 design).
+    """dispatch_topo's `for level in levels: _run_pool(...)`
+    structure guarantees that level N+1 starts only AFTER level
+    N completes. This keeps wikilink targets on disk before
+    derived contracts are documented.
 
-    Test approach: record the order in which on_progress
-    fires for each item, then assert items partition
-    cleanly by level index. A regression that collapsed
-    the level loop into a single flat pool would
-    interleave items from different levels in the
-    completion order.
+    Test approach: record the order in which on_progress fires
+    for each item, then assert items partition cleanly by level
+    index. A regression that collapsed the level loop into a
+    single flat pool would interleave items from different
+    levels in the completion order.
 
-    cap=5 + a small invoke sleep makes the test
-    meaningful: multiple items in a level run
-    concurrently, so the only thing keeping them grouped
-    by level is `_run_pool`'s synchronous return between
-    levels."""
+    cap=5 + a small invoke sleep makes the test meaningful:
+    multiple items in a level run concurrently, so the only
+    thing keeping them grouped by level is `_run_pool`'s
+    synchronous return between levels."""
     import time
 
     from src.graph.topo import topo_levels
@@ -690,21 +674,19 @@ def test_dispatch_topo_completes_level_before_next_starts(
 def test_dispatch_topo_on_progress_callback_contract(
     monkeypatch, tier0_graph_id_default_cache
 ):
-    """Chunk 3.23 / I-NEW-2: pin the on_progress callback
-    contract.
+    """Pin the on_progress callback contract.
 
     Three sub-properties:
     1. Signature: callback invoked with
        `(idx: int, total: int, item_id: str)`.
-    2. `idx` monotonically increases 1..N as items
-       complete (chunk 3.16 I16 cross-level accumulation
-       invariant).
+    2. `idx` monotonically increases 1..N as items complete
+       (the cross-level accumulation invariant — progress_idx
+       must NOT reset per topological level).
     3. `total` is the same `node_count` for every call.
 
-    No existing test covers any of these. A regression
-    that, e.g., reset progress_idx per level, or swapped
-    argument order, would silently break notebook
-    progress bars without any current test failing."""
+    A regression that, e.g., reset progress_idx per level, or
+    swapped argument order, would silently break notebook
+    progress bars."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr(
@@ -732,8 +714,8 @@ def test_dispatch_topo_on_progress_callback_contract(
     # Sub-property 2: idx monotonically 1..N.
     indices = [c[0] for c in calls]
     assert indices == list(range(1, len(indices) + 1)), (
-        f"progress_idx not monotonic 1..N (chunk 3.16 I16 "
-        f"cross-level accumulation broken): {indices}"
+        f"progress_idx not monotonic 1..N (cross-level "
+        f"accumulation broken): {indices}"
     )
 
     # Sub-property 3: total constant, equals node_count.
@@ -750,25 +732,22 @@ def test_dispatch_topo_on_progress_callback_contract(
     assert sorted(nids) == sorted(result["order"])
 
 
-# --- gather race-recovery (chunk 3.27 / I-NEW-9) ---
+# --- gather race-recovery --------------------------------------------
 
 
 def test_gather_handles_race_between_completion_and_deadline(
     monkeypatch,
 ):
-    """Chunk 3.27 / I-NEW-9: a future can complete between
+    """A future can complete between
     `concurrent.futures.wait()` returning and the timeout
-    check. Pre-3.27 the timeout branch fired on
-    `now - start_times[nid] > per_invoke_timeout` without
-    re-checking `future.done()`, mis-marking the completed
-    future as TimeoutError despite its side effects being
-    on disk. Post-3.27 the timeout branch checks done()
-    first and processes as a completion if the race fired.
+    check. The timeout branch must check `future.done()`
+    first — otherwise it mis-marks the completed future as
+    TimeoutError despite its side effects being on disk.
 
     The race is microseconds wide in production; this test
-    monkey-patches `concurrent.futures.wait` to return an
-    empty done-set even though the future is done, making
-    the timing deterministic."""
+    monkey-patches `concurrent.futures.wait` to return an empty
+    done-set even though the future is done, making the timing
+    deterministic."""
     import time as _time
     from concurrent.futures import Future
 
@@ -817,8 +796,8 @@ def test_gather_handles_race_between_completion_and_deadline(
     )
     assert results[0][1] == "ok", (
         f"expected status='ok' from race-recovery; got "
-        f"{results[0][1]!r}. Pre-3.27 the deadline check "
-        f"fires before done() check, mis-marking the "
-        f"completed future as TimeoutError despite its "
-        f"side effects being on disk."
+        f"{results[0][1]!r}. If the deadline check fires "
+        f"before the done() check, the completed future is "
+        f"mis-marked as TimeoutError despite its side effects "
+        f"being on disk."
     )

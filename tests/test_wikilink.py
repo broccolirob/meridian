@@ -87,9 +87,9 @@ def test_routing_table_does_not_route_method():
 def test_resolve_wikilink_qualifies_target_on_collision(
     monkeypatch, tier0_graph_id
 ):
-    """Chunk 3.10: when two nodes share a bare name in the same
-    folder, resolve_wikilink must point at the qualified
-    filename — otherwise the link breaks for the second node."""
+    """When two nodes share a bare name in the same folder,
+    resolve_wikilink must point at the qualified filename —
+    otherwise the link breaks for the second node."""
     from src.render import obsidian
 
     gid, cache_root = tier0_graph_id

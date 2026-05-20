@@ -84,7 +84,7 @@ def test_write_rejects_path_traversal(tmp_path):
     assert not (tmp_path / "escaped.md").exists()
 
 
-# --- atomic write (chunk 3.13) ----------------------------------------
+# --- atomic write ----------------------------------------------------
 
 
 def test_write_leaves_no_tmp_files(tmp_path):
@@ -135,8 +135,8 @@ def test_concurrent_writes_produce_one_intact_file(tmp_path):
     """10 threads writing the SAME target simultaneously. Final
     file content must be EXACTLY ONE of the writers' inputs
     (atomic os.replace) — never interleaved bytes from two
-    writers. Chunk 3.10's collision guards eliminated most
-    cross-node races, but any pair of threads on the same path
+    writers. The disambiguation logic eliminates most cross-
+    node races, but any pair of threads on the same path
     (re-runs, edge cases) must still produce intact output."""
     vault = ensure_vault(tmp_path / "vault")
     bodies = [
@@ -181,16 +181,15 @@ def test_concurrent_writes_produce_one_intact_file(tmp_path):
     assert leftovers == []
 
 
-# --- atomic-write tmp file sweep (chunk 3.27 / I-NEW-10) ---
+# --- atomic-write tmp file sweep -------------------------------------
 
 
 def test_ensure_vault_sweeps_stale_tmp_files(tmp_path):
-    """Chunk 3.27 / I-NEW-10: ensure_vault sweeps stale
-    atomic-write tmp files (`.<name>.tmp.<pid>.<tid>`)
-    older than 1 hour. These accumulate when a process is
-    killed between `write_text` and `os.replace`; without
-    a sweep, the vault grows unboundedly over crash-rerun
-    cycles."""
+    """ensure_vault sweeps stale atomic-write tmp files
+    (`.<name>.tmp.<pid>.<tid>`) older than 1 hour. These
+    accumulate when a process is killed between `write_text`
+    and `os.replace`; without a sweep, the vault grows
+    unboundedly over crash-rerun cycles."""
     import os
     import time
 

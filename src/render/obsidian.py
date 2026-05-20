@@ -30,13 +30,12 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "risks",
 )
 
-# Chunk 3.27 / I-NEW-10: threshold for sweeping atomic-write
-# tmp file orphans. 1 hour is conservative: any in-flight
-# write older than this is either a real orphan from a
-# SIGKILL'd prior run or a legitimately stuck process the
-# operator should investigate. Balances false-positive risk
-# (sweeping a real in-flight write) against accumulation
-# bounds.
+# Threshold for sweeping atomic-write tmp file orphans. 1
+# hour is conservative: any in-flight write older than this
+# is either a real orphan from a SIGKILL'd prior run or a
+# legitimately stuck process the operator should investigate.
+# Balances false-positive risk (sweeping a real in-flight
+# write) against accumulation bounds.
 _TMP_SWEEP_AGE_SECONDS = 3600.0
 
 
@@ -44,11 +43,10 @@ def _sweep_stale_tmp_files(vault: Path) -> int:
     """Remove `.<name>.tmp.<pid>.<tid>` files older than
     `_TMP_SWEEP_AGE_SECONDS` from each vault subdir.
 
-    Chunk 3.27 / I-NEW-10: atomic writes via tmp+rename
-    leave behind tmp files when the process is killed
-    between `write_text` and `os.replace`. No startup sweep
-    existed pre-3.27; tmps accumulated indefinitely over
-    crash-rerun cycles.
+    Atomic writes via tmp+rename leave behind tmp files when
+    the process is killed between `write_text` and
+    `os.replace`. Without a startup sweep, tmps would
+    accumulate indefinitely over crash-rerun cycles.
 
     Returns the count of files removed. Errors during sweep
     (permission, race-with-concurrent-write) are silently
@@ -87,12 +85,10 @@ def ensure_vault(vault_path: str | Path) -> Path:
     """Create the canonical washable vault skeleton at `vault_path`.
     Idempotent. Returns the resolved vault Path.
 
-    Chunk 3.27 / I-NEW-10: ALSO sweeps stale atomic-write
-    tmp files (older than 1 hour) from every VAULT_SUBDIR.
-    These orphans accumulate when a process is killed mid-
-    write (between write_text and os.replace); without a
-    startup sweep, vault inode count grows unboundedly
-    across crash-rerun cycles.
+    Also sweeps stale atomic-write tmp files (older than 1
+    hour) from every VAULT_SUBDIR — these orphans accumulate
+    when a process is killed mid-write (between write_text
+    and os.replace).
     """
     vault = Path(vault_path)
     vault.mkdir(parents=True, exist_ok=True)
@@ -116,7 +112,7 @@ def write_obsidian_note(
     written verbatim. Parent directories under the vault are created
     on demand. Returns the absolute path written.
 
-    Atomic-write semantics (chunk 3.13): the file is written to
+    Atomic-write semantics: the file is written to
     `.<name>.tmp.<pid>.<tid>` in the same directory, then
     `os.replace`d into the final path. Vault scanners
     (`write_root_moc`, `validate_vault.py`) and Obsidian's file
@@ -158,12 +154,11 @@ def write_obsidian_note(
         tmp_path.write_text(content, encoding="utf-8")
         os.replace(tmp_path, target)
     except Exception:
-        # Intentionally broad (chunk 3.16 I17 cleanup left this
-        # one alone): the catch exists to clean up the tmp file
-        # on ANY failure path, then re-raises. Coding bugs
-        # (TypeError, AttributeError) still surface to the
-        # caller because of the `raise` below — the broad catch
-        # is a cleanup hook, not a swallower.
+        # Intentionally broad: the catch exists to clean up
+        # the tmp file on ANY failure path, then re-raises.
+        # Coding bugs (TypeError, AttributeError) still surface
+        # to the caller because of the `raise` below — the
+        # broad catch is a cleanup hook, not a swallower.
         try:
             tmp_path.unlink()
         except OSError:
@@ -240,8 +235,7 @@ def resolve_wikilink(
     label: ``[[contracts/Pair|Pair.swap]]``.
 
     When two nodes route to the same folder with the same bare
-    name (collision case from chunk 3.10), the link target gets
-    qualified with the module prefix
+    name, the link target gets qualified with the module prefix
     (``[[contracts/contracts.A.Vault|Vault]]``). The display
     label stays bare.
 
@@ -531,14 +525,14 @@ def render_and_write_node_note(
 
     # Diagrams are enrichment — never block note writing on
     # EXPECTED failures (bad graph_id, test-synthesized node,
-    # malformed Trailmark output). Chunk 3.16 I17 narrowed the
-    # catch from `Exception` to the three concrete graph-lookup
-    # exceptions: KeyError (missing node), FileNotFoundError
-    # (missing graph cache), ValueError (input rejection by a
-    # renderer). Coding bugs (TypeError, AttributeError) NOW
-    # propagate up to the dispatcher's failure recorder so they
-    # surface in the run summary instead of silently producing
-    # diagram-less notes.
+    # malformed Trailmark output, transient cache I/O). The
+    # narrow tuple catches graph-lookup variants (KeyError,
+    # FileNotFoundError, ValueError) plus filesystem/pickle
+    # exceptions from the cache layer (OSError, EOFError,
+    # pickle.UnpicklingError). Coding bugs (TypeError,
+    # AttributeError) propagate to the dispatcher's failure
+    # recorder so they surface in the run summary instead of
+    # silently producing diagram-less notes.
     try:
         ctx["inheritance_mermaid"] = render_inheritance(
             graph_id, node["id"], cache_root=cache_root
@@ -565,13 +559,12 @@ def render_and_write_node_note(
             e,
         )
 
-    # Filename disambiguation (chunk 3.10) needs the graph to
-    # detect bare-name collisions. Same graceful fallback as the
-    # diagram block above — if the graph isn't loadable (bad gid,
-    # test fixture), use the bare path. Pre-3.10 behavior.
-    # Chunk 3.16 I17: narrowed catch (was `except Exception`) to
-    # the three graph-lookup failure modes for the same reason —
-    # programming bugs propagate so they're noticed.
+    # Filename disambiguation needs the graph to detect bare-
+    # name collisions. Same graceful fallback as the diagram
+    # block above — if the graph isn't loadable (bad gid, test
+    # fixture, transient cache I/O), use the bare path. The
+    # narrow catch tuple lets coding bugs (TypeError,
+    # AttributeError) propagate so they're noticed.
     try:
         rel_path = (
             f"{_disambiguated_path(node, graph_id, cache_root=cache_root)}"
@@ -669,13 +662,13 @@ def render_and_write_flow_note(
                 EOFError,
                 pickle.UnpicklingError,
             ) as e:
-                # Chunk 3.16 I17: narrowed from `except Exception`.
                 # KeyError (bad node ID in path), FileNotFoundError
                 # (missing graph cache), ValueError (render_sequence
-                # input validation) are the expected per-path
-                # failures — keep emitting inline placeholders for
-                # those so a partial flow note still ships
-                # (chunk 3.16 I8 design). Coding bugs propagate.
+                # input validation), OSError / EOFError /
+                # UnpicklingError (cache I/O) are the expected
+                # per-path failures — keep emitting inline
+                # placeholders so a partial flow note still ships.
+                # Coding bugs (TypeError, AttributeError) propagate.
                 _log.warning(
                     "sequence render failed for path %d (%s): %s",
                     i,
@@ -685,9 +678,9 @@ def render_and_write_flow_note(
                 parts.append(
                     f"_Sequence diagram unavailable: {e}_\n\n"
                 )
-            # Hop wikilinks (chunk 3.9): per-method navigation
-            # below the sequence diagram. Unresolvable hops fall
-            # back to a backticked bare name.
+            # Hop wikilinks: per-method navigation below the
+            # sequence diagram. Unresolvable hops fall back to
+            # a backticked bare name.
             parts.append("\n**Hops:**\n\n")
             for j, hop_id in enumerate(path, 1):
                 try:

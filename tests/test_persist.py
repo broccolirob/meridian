@@ -12,16 +12,12 @@ from src.graph.persist import (
 
 @pytest.fixture(autouse=True)
 def _clear_load_graph_cache_each_test():
-    """Chunk 3.26 / I-NEW-8: ensure every test in this file
-    starts AND ends with an empty `_load_graph_cached`.
-
-    Pre-3.26 only some tests called
-    `_load_graph_cached.cache_clear()` as setup; none called
-    it as teardown. The lru_cache is module-global, so
-    entries persisted into subsequent tests. Currently
-    harmless because tests use distinct graph_ids, but a
-    future test reusing an existing gid would inherit stale
-    cache state.
+    """Ensure every test in this file starts AND ends with an
+    empty `_load_graph_cached`. The lru_cache is module-global,
+    so without teardown its entries persist into subsequent
+    tests. Currently harmless because tests use distinct
+    graph_ids, but a future test reusing an existing gid would
+    inherit stale cache state.
 
     Autouse means this runs around every test in the file
     without per-test boilerplate."""
@@ -105,7 +101,7 @@ def test_save_rejects_malformed_graph_id(tier0_engine, bad_id, tmp_path):
     assert set(tmp_path.iterdir()) == before
 
 
-# --- mtime-aware lru_cache (chunk 3.12) ------------------------------
+# --- mtime-aware lru_cache -------------------------------------------
 
 
 def test_load_graph_caches_repeated_calls(tier0_engine, tmp_path):
@@ -175,9 +171,8 @@ def test_load_graph_cache_info_reports_hits_and_misses(
 def test_load_graph_missing_file_raises_filenotfound_after_3_12(
     tmp_path,
 ):
-    """Pre-3.12 behavior preserved: missing engine.pkl raises
-    FileNotFoundError. Validation/error path unchanged after the
-    cache refactor — failure surfaces at the outer wrapper, not
+    """Missing engine.pkl raises FileNotFoundError. The
+    validation/error path surfaces at the outer wrapper, not
     deep in pickle.load."""
     with pytest.raises(FileNotFoundError):
         load_graph("0d0d0d0d0d0d", cache_root=tmp_path)
@@ -186,16 +181,16 @@ def test_load_graph_missing_file_raises_filenotfound_after_3_12(
 def test_concurrent_load_graph_returns_same_instance(
     tier0_graph_id_default_cache,
 ):
-    """Chunk 3.25 / I-NEW-5: thundering-herd armor.
+    """Thundering-herd armor.
 
     CPython's lru_cache wrapper doesn't serialize the wrapped
-    function call on a miss — multiple concurrent callers can
-    each enter pickle.load and end up with DIFFERENT instances
-    for the same key (the cache only stores one winner; the
-    losers' instances are still held by their callers).
-    Pre-fix this races; post-fix `_LOAD_LOCK` in
-    src/graph/persist.py serializes cache access and all
-    concurrent callers receive the SAME instance.
+    function call on a miss — without an outer lock, multiple
+    concurrent callers each enter pickle.load and end up with
+    DIFFERENT instances for the same key (the cache stores
+    one winner; the losers' instances are still held by their
+    callers). `_LOAD_LOCK` in src/graph/persist.py serializes
+    cache access so all concurrent callers receive the SAME
+    instance.
 
     Test approach: force a cold cache, then start N threads
     that all wait on a `threading.Barrier` and fire load_graph
@@ -246,11 +241,11 @@ def test_concurrent_load_graph_returns_same_instance(
 def test_autouse_fixture_provides_clean_cache_at_test_entry(
     tier0_graph_id_default_cache,
 ):
-    """Chunk 3.26 / I-NEW-8: verify the autouse fixture
-    actually delivers an empty cache to every test. If the
-    fixture broke (e.g., was renamed without the autouse
-    marker), this sentinel test would observe inherited
-    cache state from earlier tests in the same session."""
+    """Verify the autouse fixture actually delivers an empty
+    cache to every test. If the fixture broke (e.g., was
+    renamed without the autouse marker), this sentinel test
+    would observe inherited cache state from earlier tests in
+    the same session."""
     info = _load_graph_cached.cache_info()
     assert info.currsize == 0, (
         f"cache should be empty at test entry; got "

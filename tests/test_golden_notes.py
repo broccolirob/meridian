@@ -78,10 +78,10 @@ def test_golden_overview_is_real(golden_path):
 
 
 def _strip_fenced_blocks(text: str) -> str:
-    """Drop ```...``` regions. Chunk 3.5 added Mermaid blocks to
-    Graph context, and their syntax (alias decls, classDef lines)
-    legitimately contains no wikilinks — they're diagrams, not
-    link lists. The populated-lines check below targets the
+    """Drop ```...``` regions. Mermaid blocks in Graph context
+    use alias decls + classDef lines that legitimately contain
+    no wikilinks — they're diagrams, not link lists. The
+    populated-lines check below targets the
     Inheritance/Implements/Uses/Callers/Callees lists only."""
     out = []
     in_fence = False

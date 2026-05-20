@@ -43,8 +43,8 @@ _meta/contracts.libraries.Math.md
 _meta/contracts.libraries.SafeMath.md
 _meta/contracts.libraries.UQ112x112.md
 
-# Flow notes (chunk 3.8 — FlowTracer on Pair's three entrypoints;
-# qualified with containing contract per chunk 3.10's collision guard).
+# Flow notes — FlowTracer on Pair's three entrypoints,
+# qualified with containing contract per the collision guard.
 flows/UniswapV2Pair.swap.md
 flows/UniswapV2Pair.mint.md
 flows/UniswapV2Pair.burn.md

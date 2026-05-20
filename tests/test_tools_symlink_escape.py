@@ -1,13 +1,12 @@
-"""Regression armor for chunk 3.26 (I-NEW-7): read_node_source
-rejects file paths that resolve outside the original
-parse_root. Defends against symlinked exfiltration via
-adversarial repos.
+"""Regression armor: read_node_source rejects file paths that
+resolve outside the original parse_root. Defends against
+symlinked exfiltration via adversarial repos.
 
 The fix's value: an attacker planting `evil.sol ->
-/etc/passwd` in their Solidity repo can't trick the LLM
-into reading /etc/passwd. read_node_source loads the
-parse_root saved at parse time and verifies the file_path
-resolves under it.
+/etc/passwd` in their Solidity repo can't trick the LLM into
+reading /etc/passwd. read_node_source loads the parse_root
+saved at parse time and verifies the file_path resolves
+under it.
 """
 
 import pytest
@@ -19,8 +18,8 @@ def test_read_node_source_rejects_file_path_outside_parse_root(
     tier0_graph_id_default_cache, monkeypatch
 ):
     """Monkey-patch get_node to return a malicious node with
-    file_path pointing outside the parse tree. Pre-3.26 the
-    file would be opened; post-3.26 ValueError is raised."""
+    file_path pointing outside the parse tree. The validator
+    raises ValueError instead of opening the file."""
     gid = tier0_graph_id_default_cache
 
     monkeypatch.setattr(

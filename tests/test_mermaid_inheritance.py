@@ -10,7 +10,7 @@ ERC20_ID = "contracts.UniswapV2ERC20:UniswapV2ERC20"
 
 
 def test_pair_inherits_erc20_is_solid(tier1_graph_id):
-    """Chunk 3.2 success criterion — literal substring from spec."""
+    """Success criterion — literal substring from spec."""
     gid, cache_root = tier1_graph_id
     out = render_inheritance(gid, PAIR_ID, cache_root=cache_root)
     assert "UniswapV2ERC20 <|-- UniswapV2Pair" in out
@@ -47,7 +47,7 @@ def test_unknown_node_raises_key_error(tier1_graph_id):
         render_inheritance(gid, "fake:DoesNotExist", cache_root=cache_root)
 
 
-# --- ambiguous phantom resolution (chunk 3.16, /review I3) ---------
+# --- ambiguous phantom resolution ------------------------------------
 
 
 def _synthetic_node(node_id: str, kind: str = "contract") -> dict:
@@ -82,9 +82,10 @@ def test_render_inheritance_ambiguous_phantom_warns_and_defaults_to_inherit(
     to the solid `<|--` (inherit) style instead of `<|..`
     (implements).
 
-    Pre-3.16 this branch was untested; a future fixture or real
-    codebase with name collisions would have hit it silently
-    and emitted wrong edge styles."""
+    Direct test on a synthetic graph; the Tier 0/1 fixtures
+    don't have name collisions that would exercise this
+    branch, so without this test a real-world repo with
+    colliding base names could emit wrong edge styles silently."""
     fake_data = {
         "language": "solidity",
         "root_path": "/fake",

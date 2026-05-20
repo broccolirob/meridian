@@ -83,7 +83,8 @@ def test_passes_focused_filter_to_dispatch_flows(
 ):
     """dispatch_flows is called with an entrypoint_filter that
     narrows to ONLY the requested entrypoint. Verifies the
-    chunk 3.15 refactor closed the monkey-patch correctly."""
+    script uses the filter parameter instead of mutating
+    module globals."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
 
     captured: dict = {}
@@ -148,11 +149,8 @@ def test_no_module_global_mutation(
     trace_module, monkeypatch, tmp_path
 ):
     """After main() returns, src.agent.attack_surface is the
-    original function — chunk 3.15 closed the monkey-patch.
-
-    Pre-3.15 this test would fail if the try/finally was
-    interrupted. Post-3.15 the function is never patched at
-    all."""
+    original function. The script uses the entrypoint_filter
+    parameter and never patches module globals."""
     import src.agent
 
     original = src.agent.attack_surface

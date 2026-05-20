@@ -1,19 +1,17 @@
-"""Regression armor for chunk 3.17 (C-NEW-1 + C-NEW-2):
-prevent the LLM-tool-schema parameter leak from coming back.
+"""Regression armor: prevent the LLM-tool-schema parameter
+leak from coming back.
 
 Every public tool exposed to the LLM (main agent's `tools=`
 list or any subagent's `tools` list) must NOT include
 `cache_root` or `vault_path` in its OpenAI function-call
-schema. The second-pass /review found that LangChain's default
-schema generation includes ALL keyword-only params; the fix
-is to annotate those params with `InjectedToolArg` so the
-schema generator excludes them.
+schema. LangChain's default schema generation includes ALL
+keyword-only params, so the load-bearing fix is to annotate
+those params with `InjectedToolArg` so the schema generator
+excludes them.
 
-If this test starts failing, a new tool was added without the
-annotation. Read the chunk 3.17 plan
-(~/.claude/plans/sharded-jingling-turing.md) for the attack
-path and copy the annotation pattern from any existing fixed
-tool, e.g.:
+If this test starts failing, a new tool was added without
+the annotation. Copy the annotation pattern from any
+existing tool:
 
     from typing import Annotated
     from langchain_core.tools import InjectedToolArg
@@ -44,13 +42,13 @@ FORBIDDEN_LLM_PARAMS = frozenset(["cache_root", "vault_path"])
 # test passing doesn't silently shrink coverage.
 MAIN_AGENT_TOOLS = [graph_summary, topo_order]
 
-# Subagent tool lists AFTER the chunk 3.17 closure wrap. The
-# writers (render_and_write_*_note) get replaced by closures
-# that pre-bind vault_path so the LLM tool schema can't expose
-# it. We test the actually-built subagent tools, not the raw
-# module-level templates — the templates still reference raw
-# writers (which DO leak vault_path on their own), but those
-# never reach the LLM in production.
+# Subagent tool lists AFTER the closure wrap. The writers
+# (render_and_write_*_note) get replaced by closures that pre-
+# bind vault_path so the LLM tool schema can't expose it. We
+# test the actually-built subagent tools, not the raw module-
+# level templates — the templates still reference raw writers
+# (which DO leak vault_path on their own), but those never
+# reach the LLM in production.
 _FAKE_VAULT = "/tmp/fake-vault-for-schema-test"
 WRAPPED_NODE_DOCUMENTER = _wrap_subagent_writers(
     NODE_DOCUMENTER_SUBAGENT, _FAKE_VAULT
@@ -89,7 +87,7 @@ def test_no_main_agent_tool_leaks_injected_params():
         assert not leaked, (
             f"{fn.__name__} leaks {leaked} to LLM schema; "
             f"add `Annotated[Path, InjectedToolArg]` to the "
-            f"parameter type (see chunk 3.17 plan)."
+            f"parameter type."
         )
 
 
@@ -102,20 +100,19 @@ def test_no_subagent_tool_leaks_injected_params():
         leaked = params & FORBIDDEN_LLM_PARAMS
         assert not leaked, (
             f"{fn.__name__} leaks {leaked} to LLM schema. "
-            f"For writers: ensure _wrap_subagent_writers replaces "
-            f"the raw function with a closure. For other tools: "
-            f"add `Annotated[Path, InjectedToolArg]` to the "
-            f"parameter type. See chunk 3.17 plan."
+            f"For writers: ensure _wrap_subagent_writers "
+            f"replaces the raw function with a closure. For "
+            f"other tools: add `Annotated[Path, "
+            f"InjectedToolArg]` to the parameter type."
         )
 
 
 def test_wrapped_writers_actually_invokable_without_vault_path():
-    """Regression armor for the actual chunk 3.17 hole: the
-    naive InjectedToolArg-only fix HID vault_path from the
-    schema but the function call still failed (Pydantic
-    validation: 'vault_path: Field required'). The closure
-    approach must let the LLM call the wrapped writer with
-    only its visible args.
+    """The naive InjectedToolArg-only approach would HIDE
+    vault_path from the schema but cause the function call to
+    fail (Pydantic validation: 'vault_path: Field required').
+    The closure wrap must let the LLM call the wrapped writer
+    with only its visible args.
 
     This is the load-bearing armor — without it, a future
     refactor could replace the closure with InjectedToolArg-

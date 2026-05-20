@@ -41,9 +41,9 @@ def test_bucket_none_defaults_to_low():
 
 
 def test_heatmap_includes_multiple_buckets(tier1_graph_id):
-    """Chunk 3.4 success criterion: a Tier 1 heatmap with
-    threshold=4 surfaces both low (CC=4) and medium (CC=6)
-    buckets. Default threshold=5 would only show medium."""
+    """Success criterion: a Tier 1 heatmap with threshold=4
+    surfaces both low (CC=4) and medium (CC=6) buckets.
+    Default threshold=5 would only show medium."""
     gid, cache_root = tier1_graph_id
     out = render_complexity_heatmap(
         gid, threshold=4, cache_root=cache_root

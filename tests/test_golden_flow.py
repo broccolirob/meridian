@@ -1,7 +1,7 @@
 """Structural regression tests for the Tier 1 flow-note golden.
 
-The golden file is produced by an LLM dispatch (chunk 3.9 manual
-step: `uv run python scripts/trace_one_flow.py …`). These tests
+The golden file is produced by an LLM dispatch (manual step:
+`uv run python scripts/trace_one_flow.py …`). These tests
 assert STRUCTURE not bytes — LLM prose varies, but frontmatter
 shape, sequence-diagram presence, and hop-wikilink syntax are
 deterministic invariants.
@@ -78,9 +78,8 @@ def test_golden_swap_has_at_least_one_path():
 
 
 def test_golden_swap_every_path_has_hops_list():
-    """Chunk 3.9 success criterion 3: every hop must wikilink
-    to its contract note — so every ### Path subsection must
-    carry a **Hops:** list."""
+    """Every hop must wikilink to its contract note — so every
+    ### Path subsection must carry a **Hops:** list."""
     text = _require_golden()
     _, body = _split(text)
     path_count = len(re.findall(r"^### Path \d+", body, re.MULTILINE))

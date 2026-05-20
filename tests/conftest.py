@@ -56,13 +56,12 @@ def tier0_graph_id_default_cache(tier0_dir):
     CONSTRAINT — tests using this fixture must NOT call
     `annotate` or `clear_annotations` against the default cache
     root. Mutations would persist in the cache file across the
-    session; chunk 3.12's mtime-aware lru_cache invalidates on
-    save, so subsequent reads SEE the mutation. That's the
-    leakage path. Use `test_annotations.py::fresh_tier0`
-    (function-scoped, tmp_path) for any test that mutates the
-    graph.
+    session; the mtime-aware lru_cache invalidates on save, so
+    subsequent reads SEE the mutation. That's the leakage path.
+    Use `test_annotations.py::fresh_tier0` (function-scoped,
+    tmp_path) for any test that mutates the graph.
 
-    Lifecycle (chunk 3.16, /review I9):
+    Lifecycle:
       1. Pre-wipe `.washable/graph/<gid>/` so prior-session
          crashes can't leak stale state into this run.
       2. Parse fresh via `trailmark_parse` — writes engine.pkl.
@@ -79,8 +78,8 @@ def tier0_graph_id_default_cache(tier0_dir):
 
     # Pre-wipe: handles prior-session crashes that left stale
     # state (engine.pkl with annotations, leaked .tmp.* files
-    # from a torn write — chunk 3.13's atomic-write idiom should
-    # clean tmps, but defense in depth).
+    # from a torn write — atomic-write usually cleans tmps,
+    # but defense in depth).
     if cache_dir.exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
 

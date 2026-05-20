@@ -1,9 +1,7 @@
 """Mermaid renderers for call graphs, inheritance trees,
 sequence diagrams, complexity heatmaps, and containment diagrams.
-
-Chunk 3.1: call graphs. 3.2: inheritance. 3.3: sequence. 3.4:
-heatmap + containment + styling patterns from Trail of Bits'
-diagramming-code skill.
+Styling patterns ported from Trail of Bits' diagramming-code
+skill.
 
 Each renderer returns a complete fenced Mermaid block ready to
 embed in Markdown:
@@ -14,27 +12,26 @@ embed in Markdown:
         ...
     ```
 
-Why fenced: the consumers (chunk 3.5 onward) drop these into
-Markdown body text. Returning bare Mermaid forces every caller to
-wrap it identically; centralizing the fence here removes one
-opportunity for inconsistent embedding.
+Why fenced: the consumers drop these into Markdown body text.
+Returning bare Mermaid forces every caller to wrap it
+identically; centralizing the fence here removes one opportunity
+for inconsistent embedding.
 
-Renderer surface and consumers (chunk 3.16, /review I13):
+Renderer surface and consumers:
 
     | Renderer                  | Production consumer             |
     | ------------------------- | ------------------------------- |
-    | render_call_graph         | chunk 3.5 — node notes          |
-    | render_inheritance        | chunk 3.5 — node notes          |
-    | render_sequence           | chunk 3.7 — flow notes          |
+    | render_call_graph         | node notes                      |
+    | render_inheritance        | node notes                      |
+    | render_sequence           | flow notes                      |
     | render_complexity_heatmap | RESERVED for chunk 4.5          |
     | render_containment        | RESERVED — no consumer yet      |
 
-The two RESERVED renderers ship today only because chunk 3.4's
-plan called for building them alongside the three live ones (the
-diagramming-code skill exported the same set). They are tested
-against Tier 1 (`tests/test_mermaid_styles.py`) so the renderer
-contracts stay green; when their consumers land, they slot in
-without surprises.
+The two RESERVED renderers ship today only because they were
+built alongside the three live ones (the upstream diagramming-
+code skill exported the same set). They are tested against Tier 1
+(`tests/test_mermaid_styles.py`) so the renderer contracts stay
+green; when their consumers land, they slot in without surprises.
 """
 
 import json
@@ -246,8 +243,8 @@ def render_inheritance(
 
     Returns a fenced Mermaid block. The diagram always declares
     at least a `class <Name>` for the focus, even when there are
-    no inheritance edges — so the consumer (chunk 3.5) can embed
-    without checking for empty output.
+    no inheritance edges — so the consumer can embed without
+    checking for empty output.
 
     Raises:
         KeyError: if `node_id` isn't in the cached graph.
@@ -392,8 +389,7 @@ def render_complexity_heatmap(
     `risks/hotspots.md`. No production caller today — only
     `tests/test_mermaid_styles.py` exercises it so the renderer
     contract stays pinned until 4.5 lands. See PLAN.md
-    "RiskSynthesizer" and chunk 3.4's "out of scope" entry for
-    the design rationale.
+    "RiskSynthesizer" for the design rationale.
 
     Only methods with `cyclomatic_complexity >= threshold` are
     included. Each is tagged `:::low`/`:::medium`/`:::high` based
@@ -476,14 +472,13 @@ def render_containment(
     """Render a Mermaid classDiagram showing `node_id`'s direct
     methods as a class body.
 
-    RESERVED — no production consumer today. Chunk 3.4's plan
-    flagged this renderer as ahead-of-need; chunk 3.5 explicitly
-    decided NOT to embed containment in node notes because it
-    would be redundant with the `### Functions` section already
-    rendered by `render_node_note`. Kept here (and tested in
-    `tests/test_mermaid_styles.py`) so a future Phase 4+ chunk
-    can use it for, e.g., contract MOCs or a "class hierarchy"
-    overview without re-implementing.
+    RESERVED — no production consumer today. Built ahead-of-
+    need; node notes deliberately don't embed containment
+    because it would be redundant with the `### Functions`
+    section already rendered by `render_node_note`. Kept here
+    (and tested in `tests/test_mermaid_styles.py`) so a future
+    Phase 4+ chunk can use it for, e.g., contract MOCs or a
+    "class hierarchy" overview without re-implementing.
 
     `node_id` must be a contract/library/interface/module node.
     Methods are discovered via `contains` edges where the source

@@ -17,24 +17,23 @@ from src.graph.persist import (
     save_parse_root,
 )
 
-# Process-level lock for graph-write paths in src/tools.py
-# (chunk 3.25 / I-NEW-6: scope expanded from "annotation writes
-# only" to "any save_graph caller in this module").
+# Process-level lock for graph-write paths in src/tools.py —
+# scope covers every save_graph caller in this module
+# (annotate, clear_annotations, AND trailmark_parse).
 #
 # Without this:
 #   - Two threads in dispatch_topo's ThreadPoolExecutor can both
 #     load engine v1, both annotate, and the second save_graph
-#     overwrites the first's annotation (lost update). This is
-#     the original chunk 0.3 concern that motivated the lock.
+#     overwrites the first's annotation (lost update).
 #   - A concurrent trailmark_parse and annotate (theoretical
 #     today; no caller does this) could race on save_graph —
 #     parse's save and annotate's save would clobber each other.
-#     Chunk 3.25 wraps trailmark_parse's save with this lock as
+#     trailmark_parse's save is wrapped with this lock as
 #     defense-in-depth.
 #
-# Atomic writes in save_graph (chunk 3.13) fixed the partial-read
-# race but not lost-update. Cross-process locking (fcntl.flock)
-# is parked — Phase 2 runs in one Python process; multi-process
+# Atomic writes in save_graph fixed the partial-read race but
+# not lost-update. Cross-process locking (fcntl.flock) is
+# parked — washable runs in one Python process; multi-process
 # is a future concern.
 _ANNOTATE_LOCK = threading.Lock()
 
@@ -68,15 +67,12 @@ def trailmark_parse(
 ) -> str:
     """Parse `repo_path`, persist the engine, return its graph_id.
 
-    Chunk 3.25 / I-NEW-6: the save_graph call is serialized
-    under `_ANNOTATE_LOCK` so a future flow that runs parse
-    concurrently with annotate can't lose updates.
-
-    Chunk 3.26 / I-NEW-7: ALSO writes `parse_root.txt`
-    alongside engine.pkl so `read_node_source` can enforce
-    that file paths it reads are within the parsed directory
-    (defends against symlinked exfiltration via adversarial
-    repos).
+    The save_graph call is serialized under `_ANNOTATE_LOCK`
+    so a future flow that runs parse concurrently with annotate
+    can't lose updates. Also writes `parse_root.txt` alongside
+    engine.pkl so `read_node_source` can enforce that file
+    paths it reads are within the parsed directory — defends
+    against symlinked exfiltration via adversarial repos.
     """
     engine = QueryEngine.from_directory(str(repo_path), language=language)
     rh = repo_hash(repo_path)
@@ -198,18 +194,17 @@ def annotate(
     duplicate). Persists changes via save_graph."""
     kind_enum = _to_annotation_kind(kind)
     with _ANNOTATE_LOCK:
-        # Deep-copy the cached instance before mutating (chunk
-        # 3.18, /review C-NEW-3). The chunk 3.16 C6 lru_cache
-        # makes every worker share the SAME QueryEngine
-        # reference; concurrent unlocked readers iterate
-        # engine._store._graph.annotations (and other internal
-        # dicts) while this write runs. Mutating that shared
-        # reference in-place would race with reader iteration
-        # (RuntimeError: dictionary changed size during
-        # iteration). save_graph below bumps file mtime via
-        # atomic os.replace, which invalidates the mtime-keyed
-        # lru_cache so subsequent readers re-load from disk and
-        # see the new state.
+        # Deep-copy the cached instance before mutating. The
+        # mtime-aware lru_cache makes every worker share the
+        # SAME QueryEngine reference; concurrent unlocked
+        # readers iterate engine._store._graph.annotations (and
+        # other internal dicts) while this write runs. Mutating
+        # that shared reference in-place would race with reader
+        # iteration (RuntimeError: dictionary changed size
+        # during iteration). save_graph below bumps file mtime
+        # via atomic os.replace, which invalidates the mtime-
+        # keyed lru_cache so subsequent readers re-load from
+        # disk and see the new state.
         engine = copy.deepcopy(
             load_graph(graph_id, cache_root=cache_root)
         )
@@ -259,7 +254,7 @@ def clear_annotations(
     kind_enum = _to_annotation_kind(kind) if kind is not None else None
     with _ANNOTATE_LOCK:
         # Deep-copy before mutating (see `annotate` for the
-        # chunk 3.18 C-NEW-3 rationale).
+        # reader-race rationale).
         engine = copy.deepcopy(
             load_graph(graph_id, cache_root=cache_root)
         )
@@ -313,19 +308,17 @@ def read_node_source(
     names a path, so it can't be prompt-injected into reading
     `/etc/passwd` via tool arguments.
 
-    Chunk 3.26 / I-NEW-7: ALSO validates that the recorded
-    `file_path` is INSIDE the original `parse_root`. Defends
-    against the chunk 3.16 security specialist's symlink-
-    exfiltration finding: Trailmark's source walker follows
-    file-level symlinks, so an adversarial repo can plant
-    `evil.sol -> /etc/passwd` and the parsed graph will record
-    `/etc/passwd` as a node's file_path. This check rejects any
-    path resolving outside parse_root.
+    Also validates that the recorded `file_path` is INSIDE the
+    original `parse_root`. Defends against symlink-exfiltration:
+    Trailmark's source walker follows file-level symlinks, so
+    an adversarial repo can plant `evil.sol -> /etc/passwd` and
+    the parsed graph will record `/etc/passwd` as a node's
+    file_path. This check rejects any path resolving outside
+    parse_root.
 
-    Backward-compat: pre-3.26 caches don't have
-    `parse_root.txt`. `load_parse_root` returns None for those;
-    this function falls back to the pre-3.26 behavior (trust
-    the path) rather than rejecting wholesale.
+    Backward-compat: legacy caches without `parse_root.txt`
+    fall back to trust-the-path behavior (`load_parse_root`
+    returns None) rather than rejecting wholesale.
     """
     parse_root = load_parse_root(graph_id, cache_root=cache_root)
     node = get_node(graph_id, node_id, cache_root=cache_root)
@@ -340,7 +333,7 @@ def read_node_source(
                 f"{file_path} escapes parse_root {parse_root}. "
                 f"Likely a symlinked file in the parsed repo "
                 f"pointing outside the parse tree — possible "
-                f"exfiltration attempt (chunk 3.26 / I-NEW-7)."
+                f"exfiltration attempt."
             ) from None
     return read_file_range(
         file_path, loc["start_line"], loc["end_line"]
@@ -423,9 +416,8 @@ def complexity_hotspots(
         ValueError: if `threshold` is negative. Cyclomatic
             complexity is non-negative, so a negative threshold
             would match every method — almost certainly a
-            caller-side bug, not an intent. Mirrors the same
-            validation in `render_complexity_heatmap`
-            (chunk 3.16, /review I12).
+            caller-side bug. Mirrors the same validation in
+            `render_complexity_heatmap`.
     """
     if threshold < 0:
         raise ValueError(f"threshold must be >= 0 (got {threshold})")

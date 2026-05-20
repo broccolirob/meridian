@@ -8,7 +8,7 @@ SWAP_ID = "contracts.UniswapV2Pair:UniswapV2Pair.swap"
 
 
 def test_swap_diagram_contains_required_nodes(tier1_graph_id):
-    """Chunk 3.1 success criterion: swap + _update + _safeTransfer
+    """Success criterion: swap + _update + _safeTransfer
     all present in the call graph at default depth."""
     gid, cache_root = tier1_graph_id
     out = render_call_graph(gid, SWAP_ID, cache_root=cache_root)
@@ -50,7 +50,7 @@ def test_output_is_byte_stable(tier1_graph_id):
     assert a == b
 
 
-# --- cycle handling (chunk 3.16, /review I4) --------------------------
+# --- cycle handling --------------------------------------------------
 
 
 def _method_node(node_id: str) -> dict:
@@ -77,9 +77,9 @@ def _method_node(node_id: str) -> dict:
 
 def test_render_call_graph_terminates_on_mutual_recursion(monkeypatch):
     """Mutual recursion A.foo ↔ B.bar must NOT infinite-loop the
-    BFS. The `visited` set + `edges` set (chunk 3.1) are what
-    make this safe; pre-3.16 Tier 0/1 fixtures were DAGs so the
-    cycle-handling claim in the docstring was unverified.
+    BFS. The `visited` set + `edges` set are what make this
+    safe; the Tier 0/1 fixtures are DAGs so the cycle-handling
+    claim in the docstring needed direct armor.
 
     Invariants checked:
       1. Termination — test returns at all (no infinite loop).
@@ -190,19 +190,18 @@ def test_render_call_graph_terminates_on_self_loop(monkeypatch):
     assert "n0 --> n0" in edge_lines[0]
 
 
-# --- _quoted_label direct unit tests (chunk 3.16, /review I11) ------
+# --- _quoted_label direct unit tests ---------------------------------
 #
 # The function is module-private and gets covered indirectly through
-# `render_call_graph` + `render_complexity_heatmap`. /review I11
-# noted that the `"`-escape branch is dead in production because
-# `_validate_node_id` excludes `"` at the trust boundary and
-# `_bare_name`-derived labels (the only inputs `_quoted_label`
-# sees today) inherit that restriction. The escape stays in
-# place — removing it would silently produce broken Mermaid
-# (`""foo""` instead of `"&quot;foo&quot;"`) if Trailmark ever
-# surfaces `"`-bearing IDs (e.g., a future language). These
-# direct tests pin every reachable AND defensive branch so the
-# escape is no longer "dead and untested".
+# `render_call_graph` + `render_complexity_heatmap`. The `"`-escape
+# branch is dead in production because `_validate_node_id` excludes
+# `"` at the trust boundary and `_bare_name`-derived labels (the
+# only inputs `_quoted_label` sees today) inherit that restriction.
+# The escape stays in place — removing it would silently produce
+# broken Mermaid (`""foo""` instead of `"&quot;foo&quot;"`) if
+# Trailmark ever surfaces `"`-bearing IDs (e.g., a future
+# language). These direct tests pin every reachable AND defensive
+# branch so the escape is no longer "dead and untested".
 
 
 def test_quoted_label_passes_clean_solidity_id_unchanged():

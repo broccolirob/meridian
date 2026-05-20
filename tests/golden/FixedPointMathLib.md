@@ -12,9 +12,27 @@ callees_count: 0
 
 ## Overview
 
-FixedPointMathLib provides small, gas-efficient fixed-point arithmetic helpers (wad scale = 1e18) used for multiplying, dividing and exponentiation with correct rounding behavior. The library implements safe multiply/divide primitives with both downwards and upwards rounding (see mulDivDown/mulDivUp at lines 36-69) and higher-level convenience functions like mulWadDown/mulWadUp and divWadDown/divWadUp (lines 16-30). It also includes rpow (lines 71-158) for repeated exponentiation with a custom scalar, an integer sqrt implementation (lines 164-227) and a few unsafe helpers that return 0 instead of reverting on divide/modulo-by-zero (lines 229-254). The source is at tests/fixtures/tier0_erc4626/src/utils/FixedPointMathLib.sol (lines 7-255).
+FixedPointMathLib is an arithmetic library providing fixed-point operations (WAD = 1e18) used for scaled multiplication, division, exponentiation and square roots. It exposes low-level helpers like mulDivDown/mulDivUp (lines 36-69) that perform checked multiply-and-divide with rounding modes, and convenience WAD wrappers (lines 16-30) for common ETH/ERC20-scaled math. The rpow implementation (lines 71-158) computes x**n with a given scalar using exponentiation by squaring in assembly, and sqrt (lines 164-227) implements an integer square root via the Babylonian method. Many functions use inline assembly and explicitly handle overflow/zero-denominator cases; read the implementations at lines 7-255 for details.
 
 ## Graph context
+
+### Inheritance diagram
+
+```mermaid
+classDiagram
+    class FixedPointMathLib
+```
+
+### Call graph
+
+```mermaid
+graph TD
+    n0[FixedPointMathLib.divWadDown]
+    n1[FixedPointMathLib.mulDivDown]
+    class n0 focus;
+    classDef focus stroke:#f66,stroke-width:3px;
+    n0 --> n1
+```
 
 ### Inheritance
 
@@ -52,17 +70,17 @@ _None._
 
 ### Internal
 
-- [[libraries/FixedPointMathLib|FixedPointMathLib.mulWadDown]] `mulWadDown(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 1)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.mulWadUp]] `mulWadUp(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 1)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.divWadDown]] `divWadDown(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 1)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.divWadUp]] `divWadUp(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 1)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.mulDivDown]] `mulDivDown(uint256 x, uint256 y, uint256 denominator) -> uint256` — complexity 1 (callers: 4, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.mulDivUp]] `mulDivUp(uint256 x, uint256 y, uint256 denominator) -> uint256` — complexity 1 (callers: 4, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.rpow]] `rpow(uint256 x, uint256 n, uint256 scalar) -> uint256` — complexity 1 (callers: 0, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.sqrt]] `sqrt(uint256 x) -> uint256` — complexity 1 (callers: 0, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeMod]] `unsafeMod(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeDiv]] `unsafeDiv(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 0)
-- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeDivUp]] `unsafeDivUp(uint256 x, uint256 y) -> uint256` — complexity 1 (callers: 0, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.mulWadDown]] `mulWadDown(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 1)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.mulWadUp]] `mulWadUp(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 1)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.divWadDown]] `divWadDown(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 1, callees: 1)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.divWadUp]] `divWadUp(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 1)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.mulDivDown]] `mulDivDown(uint256 x, uint256 y, uint256 denominator) returns (uint256)` — complexity 1 (callers: 2, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.mulDivUp]] `mulDivUp(uint256 x, uint256 y, uint256 denominator) returns (uint256)` — complexity 1 (callers: 2, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.rpow]] `rpow(uint256 x, uint256 n, uint256 scalar) returns (uint256)` — complexity 1 (callers: 0, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.sqrt]] `sqrt(uint256 x) returns (uint256)` — complexity 1 (callers: 0, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeMod]] `unsafeMod(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeDiv]] `unsafeDiv(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 0)
+- [[libraries/FixedPointMathLib|FixedPointMathLib.unsafeDivUp]] `unsafeDivUp(uint256 x, uint256 y) returns (uint256)` — complexity 1 (callers: 0, callees: 0)
 
 ### Private
 

@@ -179,3 +179,64 @@ def test_concurrent_writes_produce_one_intact_file(tmp_path):
         if p.name != "Pair.md"
     ]
     assert leftovers == []
+
+
+# --- atomic-write tmp file sweep (chunk 3.27 / I-NEW-10) ---
+
+
+def test_ensure_vault_sweeps_stale_tmp_files(tmp_path):
+    """Chunk 3.27 / I-NEW-10: ensure_vault sweeps stale
+    atomic-write tmp files (`.<name>.tmp.<pid>.<tid>`)
+    older than 1 hour. These accumulate when a process is
+    killed between `write_text` and `os.replace`; without
+    a sweep, the vault grows unboundedly over crash-rerun
+    cycles."""
+    import os
+    import time
+
+    from src.render.obsidian import ensure_vault
+
+    contracts = tmp_path / "contracts"
+    contracts.mkdir(parents=True)
+
+    stale = contracts / ".foo.md.tmp.12345.67890"
+    stale.write_text("simulated partial write\n")
+    # Backdate mtime to 2 hours ago (past the 1h threshold).
+    old_mtime = time.time() - 7200
+    os.utime(stale, (old_mtime, old_mtime))
+
+    recent = contracts / ".bar.md.tmp.99999.11111"
+    recent.write_text("recent partial — should survive sweep\n")
+
+    # Real notes must always survive.
+    real_note = contracts / "RealContract.md"
+    real_note.write_text("# RealContract\nbody")
+
+    ensure_vault(tmp_path)
+
+    assert not stale.exists(), (
+        "stale tmp orphan should be swept by ensure_vault"
+    )
+    assert recent.exists(), (
+        "recent tmp must NOT be swept (sweep threshold is "
+        "1 hour; this one is fresh)"
+    )
+    assert real_note.exists(), (
+        "real note must NOT be swept (not a tmp orphan)"
+    )
+
+
+def test_ensure_vault_sweep_handles_missing_subdirs(tmp_path):
+    """Sweep is best-effort; if a VAULT_SUBDIR doesn't
+    exist (e.g., a brand-new vault before any writes),
+    sweep short-circuits cleanly without erroring."""
+    from src.render.obsidian import VAULT_SUBDIRS, ensure_vault
+
+    # Brand-new vault — no subdirs exist yet.
+    result = ensure_vault(tmp_path)
+
+    # ensure_vault returns the vault path; subdirs are
+    # created. No exception raised.
+    assert result == tmp_path
+    for subdir in VAULT_SUBDIRS:
+        assert (tmp_path / subdir).exists()

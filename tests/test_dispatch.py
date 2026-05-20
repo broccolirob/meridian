@@ -748,3 +748,77 @@ def test_dispatch_topo_on_progress_callback_contract(
     # callback.
     nids = [c[2] for c in calls]
     assert sorted(nids) == sorted(result["order"])
+
+
+# --- gather race-recovery (chunk 3.27 / I-NEW-9) ---
+
+
+def test_gather_handles_race_between_completion_and_deadline(
+    monkeypatch,
+):
+    """Chunk 3.27 / I-NEW-9: a future can complete between
+    `concurrent.futures.wait()` returning and the timeout
+    check. Pre-3.27 the timeout branch fired on
+    `now - start_times[nid] > per_invoke_timeout` without
+    re-checking `future.done()`, mis-marking the completed
+    future as TimeoutError despite its side effects being
+    on disk. Post-3.27 the timeout branch checks done()
+    first and processes as a completion if the race fired.
+
+    The race is microseconds wide in production; this test
+    monkey-patches `concurrent.futures.wait` to return an
+    empty done-set even though the future is done, making
+    the timing deterministic."""
+    import time as _time
+    from concurrent.futures import Future
+
+    import src.agent as agent_module
+    from src.agent import _gather_with_per_invoke_timeout
+
+    # Simulate the race: wait() returns empty done-set even
+    # though pending contains a future that completed.
+    def fake_wait(pending, *, timeout=None, return_when=None):
+        return (set(), pending)
+
+    monkeypatch.setattr(
+        agent_module.concurrent.futures,
+        "wait",
+        fake_wait,
+    )
+
+    # Already-done future — simulates the race where the
+    # worker completed between wait() and the deadline
+    # check.
+    completed_future: Future = Future()
+    completed_future.set_result(
+        ("ok", {"node_id": "n1", "agent_reply": "/n1.md"})
+    )
+    assert completed_future.done()
+
+    futures_map = {completed_future: "n1"}
+    # Stale start_time — deadline is well past.
+    start_times = {"n1": _time.monotonic() - 100.0}
+
+    results: list[tuple[str, str, object]] = []
+
+    def on_done(nid: str, status: str, info: object) -> None:
+        results.append((nid, status, info))
+
+    _gather_with_per_invoke_timeout(
+        futures_map,
+        start_times=start_times,
+        per_invoke_timeout=0.01,
+        on_done=on_done,
+    )
+
+    assert len(results) == 1, (
+        f"expected exactly one on_done call; got "
+        f"{len(results)}: {results}"
+    )
+    assert results[0][1] == "ok", (
+        f"expected status='ok' from race-recovery; got "
+        f"{results[0][1]!r}. Pre-3.27 the deadline check "
+        f"fires before done() check, mis-marking the "
+        f"completed future as TimeoutError despite its "
+        f"side effects being on disk."
+    )

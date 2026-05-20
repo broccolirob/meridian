@@ -2,6 +2,7 @@ import logging
 import os
 import pickle
 import threading
+import time as _time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,14 +30,76 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "risks",
 )
 
+# Chunk 3.27 / I-NEW-10: threshold for sweeping atomic-write
+# tmp file orphans. 1 hour is conservative: any in-flight
+# write older than this is either a real orphan from a
+# SIGKILL'd prior run or a legitimately stuck process the
+# operator should investigate. Balances false-positive risk
+# (sweeping a real in-flight write) against accumulation
+# bounds.
+_TMP_SWEEP_AGE_SECONDS = 3600.0
+
+
+def _sweep_stale_tmp_files(vault: Path) -> int:
+    """Remove `.<name>.tmp.<pid>.<tid>` files older than
+    `_TMP_SWEEP_AGE_SECONDS` from each vault subdir.
+
+    Chunk 3.27 / I-NEW-10: atomic writes via tmp+rename
+    leave behind tmp files when the process is killed
+    between `write_text` and `os.replace`. No startup sweep
+    existed pre-3.27; tmps accumulated indefinitely over
+    crash-rerun cycles.
+
+    Returns the count of files removed. Errors during sweep
+    (permission, race-with-concurrent-write) are silently
+    swallowed — the sweep is best-effort hygiene, not a
+    correctness primitive.
+    """
+    now = _time.time()
+    removed = 0
+    for subdir_name in VAULT_SUBDIRS:
+        subdir = vault / subdir_name
+        if not subdir.exists():
+            continue
+        try:
+            entries = list(subdir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.startswith("."):
+                continue
+            if ".tmp." not in entry.name:
+                continue
+            try:
+                age = now - entry.stat().st_mtime
+            except OSError:
+                continue
+            if age > _TMP_SWEEP_AGE_SECONDS:
+                try:
+                    entry.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
 
 def ensure_vault(vault_path: str | Path) -> Path:
     """Create the canonical washable vault skeleton at `vault_path`.
-    Idempotent. Returns the resolved vault Path."""
+    Idempotent. Returns the resolved vault Path.
+
+    Chunk 3.27 / I-NEW-10: ALSO sweeps stale atomic-write
+    tmp files (older than 1 hour) from every VAULT_SUBDIR.
+    These orphans accumulate when a process is killed mid-
+    write (between write_text and os.replace); without a
+    startup sweep, vault inode count grows unboundedly
+    across crash-rerun cycles.
+    """
     vault = Path(vault_path)
     vault.mkdir(parents=True, exist_ok=True)
     for sub in VAULT_SUBDIRS:
         (vault / sub).mkdir(exist_ok=True)
+    # Best-effort sweep of atomic-write tmp orphans.
+    _sweep_stale_tmp_files(vault)
     return vault
 
 

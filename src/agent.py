@@ -313,6 +313,38 @@ def _gather_with_per_invoke_timeout(
     # Deadlock detector: time of last `pending` decrease.
     last_progress = time.monotonic()
 
+    def _drain_completion(future: concurrent.futures.Future) -> None:
+        """Process a `done()` future as a completion: resolve
+        its result (translating worker exceptions to a "fail"
+        tuple), call on_done with safety, discard from pending.
+
+        Used by both the completion branch (futures that wait()
+        returned in `done`) and the race-recovery path inside
+        the timeout branch (chunk 3.27 I-NEW-9: futures that
+        became done between wait() and the deadline check).
+        """
+        nid = futures_map[future]
+        try:
+            try:
+                status, info = future.result(timeout=0)
+            except Exception as e:
+                status, info = "fail", f"{type(e).__name__}: {e}"
+            # A failure HERE (e.g., caller-supplied on_progress
+            # hit a broken pipe) is logged and swallowed so
+            # the gather loop drains the rest of pending
+            # instead of abandoning in-flight workers (chunk
+            # 3.19, /review C-NEW-4).
+            try:
+                on_done(nid, status, info)
+            except Exception:
+                _log.exception(
+                    "on_done raised for %s; continuing to "
+                    "drain remaining futures",
+                    nid,
+                )
+        finally:
+            pending.discard(future)
+
     while pending:
         size_before = len(pending)
         done, _still_pending = concurrent.futures.wait(
@@ -322,37 +354,22 @@ def _gather_with_per_invoke_timeout(
         )
         # Completion branch.
         for future in done:
-            nid = futures_map[future]
-            try:
-                # Resolve the worker's outcome first. Worker
-                # exceptions translate to a ("fail", "...")
-                # tuple so we still call on_done with a real
-                # status.
-                try:
-                    status, info = future.result(timeout=0)
-                except Exception as e:
-                    status, info = "fail", f"{type(e).__name__}: {e}"
-                # Then call on_done exactly once. A failure
-                # HERE (e.g., caller-supplied on_progress hit a
-                # broken pipe) is logged and swallowed so the
-                # gather loop drains the rest of pending instead
-                # of abandoning in-flight workers (chunk 3.19,
-                # /review C-NEW-4).
-                try:
-                    on_done(nid, status, info)
-                except Exception:
-                    _log.exception(
-                        "on_done raised for %s; continuing to "
-                        "drain remaining futures",
-                        nid,
-                    )
-            finally:
-                pending.discard(future)
+            _drain_completion(future)
 
-        # Per-invoke timeout branch: only RUNNING workers have a
-        # deadline. Queued futures (not in start_times) wait.
+        # Per-invoke timeout branch with race recovery
+        # (chunk 3.27 I-NEW-9): a future may have completed
+        # between wait() and now. Check done() first so we
+        # process race-completed futures as completions
+        # rather than mis-marking them as TimeoutErrors.
         now = time.monotonic()
         for future in list(pending):
+            if future.done():
+                # Race: completed between wait() and this
+                # check. Its side effect (e.g., file write)
+                # is already on disk; on_done must reflect
+                # the real outcome, not a spurious timeout.
+                _drain_completion(future)
+                continue
             nid = futures_map[future]
             if nid not in start_times:
                 # Future hasn't been picked up by a worker yet

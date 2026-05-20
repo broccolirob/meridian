@@ -1,4 +1,6 @@
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +49,16 @@ def write_obsidian_note(
     Frontmatter is serialized as YAML between `---` markers. If
     `frontmatter` is empty, no marker block is emitted. The body is
     written verbatim. Parent directories under the vault are created
-    on demand. Returns the absolute path written."""
+    on demand. Returns the absolute path written.
+
+    Atomic-write semantics (chunk 3.13): the file is written to
+    `.<name>.tmp.<pid>.<tid>` in the same directory, then
+    `os.replace`d into the final path. Vault scanners
+    (`write_root_moc`, `validate_vault.py`) and Obsidian's file
+    watcher always observe EITHER the previous contents OR the
+    complete new contents — never a partial file. Mirrors the
+    pattern in `src/graph/persist.py::save_graph`.
+    """
     vault = Path(vault_path)
     target = vault / rel_path
     try:
@@ -69,8 +80,24 @@ def write_obsidian_note(
     parts.append(body)
     if not body.endswith("\n"):
         parts.append("\n")
+    content = "".join(parts)
 
-    target.write_text("".join(parts), encoding="utf-8")
+    # PID + thread ID in the tmp name so concurrent ThreadPool
+    # workers in the same process can't clobber each other's tmp.
+    # (save_graph uses PID only because _ANNOTATE_LOCK serializes
+    # its writes; write_obsidian_note has no such lock.)
+    tmp_path = target.parent / (
+        f".{target.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    )
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, target)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
     return target
 
 

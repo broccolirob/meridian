@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import os
 import pickle
@@ -57,11 +58,59 @@ def save_graph(
     return final_path
 
 
+@functools.lru_cache(maxsize=4)
+def _load_graph_cached(
+    graph_id: str,
+    cache_root: Path,
+    mtime_ns: int,
+) -> QueryEngine:
+    """Inner cache layer. Keyed by (graph_id, cache_root, mtime_ns).
+    The mtime component ensures invalidation: save_graph's atomic
+    os.replace (chunk 0.3) updates mtime atomically with the
+    rename, so the next call gets a fresh cache key → miss →
+    fresh pickle.load.
+
+    Private — validation already happened in the outer load_graph.
+    """
+    engine_path = cache_root / graph_id / "engine.pkl"
+    with open(engine_path, "rb") as f:
+        return pickle.load(f)
+
+
 def load_graph(
     graph_id: str,
     cache_root: Path = CACHE_ROOT,
 ) -> QueryEngine:
+    """Load the persisted QueryEngine for `graph_id`.
+
+    Memoized via an mtime-aware lru_cache (chunk 3.12): identical
+    (graph_id, cache_root) pairs return the SAME in-process
+    QueryEngine instance until the underlying file is rewritten
+    by save_graph. Chunk 0.3's atomic os.replace bumps mtime
+    atomically with the rename, so cache invalidation is automatic
+    — no cache_clear() call needed at the writer.
+
+    Cache size: 4 entries (see _load_graph_cached). Sufficient for
+    the common case (one graph per dispatch); rare cross-tier
+    sessions evict in LRU order.
+
+    Concurrency: _ANNOTATE_LOCK in src/tools.py serializes the
+    only mutator path. Concurrent readers without writes see the
+    same cached instance; readers that arrive after a write get
+    the fresh mtime → cache miss.
+
+    Raises:
+        ValueError: if `graph_id` doesn't match the 12-hex pattern.
+        FileNotFoundError: if the cache file doesn't exist.
+    """
     _validate_graph_id(graph_id)
-    path = Path(cache_root) / graph_id / "engine.pkl"
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    # Normalize to positional Path so the inner cache key is
+    # consistent regardless of how the caller passed cache_root.
+    cache_root = Path(cache_root)
+    engine_path = cache_root / graph_id / "engine.pkl"
+    if not engine_path.exists():
+        raise FileNotFoundError(
+            f"graph not in cache: {engine_path}"
+        )
+    mtime_ns = engine_path.stat().st_mtime_ns
+    return _load_graph_cached(graph_id, cache_root, mtime_ns)

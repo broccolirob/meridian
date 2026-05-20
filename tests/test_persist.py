@@ -1,6 +1,13 @@
+import time
+
 import pytest
 
-from src.graph.persist import load_graph, repo_hash, save_graph
+from src.graph.persist import (
+    _load_graph_cached,
+    load_graph,
+    repo_hash,
+    save_graph,
+)
 
 
 def test_repo_hash_stable_and_unique():
@@ -76,3 +83,81 @@ def test_save_rejects_malformed_graph_id(tier0_engine, bad_id, tmp_path):
         save_graph(tier0_engine, bad_id, cache_root=tmp_path)
     # Validator runs before mkdir — no new entries under tmp_path
     assert set(tmp_path.iterdir()) == before
+
+
+# --- mtime-aware lru_cache (chunk 3.12) ------------------------------
+
+
+def test_load_graph_caches_repeated_calls(tier0_engine, tmp_path):
+    """Two load_graph calls with identical args return the SAME
+    instance. This is the leverage point — Tier 1 dispatch had
+    100+ pickle.load calls of the same engine; now collapses to
+    one per (graph_id, cache_root, mtime) key."""
+    _load_graph_cached.cache_clear()
+    gid = "0123456789ab"
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    e1 = load_graph(gid, cache_root=tmp_path)
+    e2 = load_graph(gid, cache_root=tmp_path)
+    assert e1 is e2
+
+
+def test_load_graph_invalidates_when_file_rewritten(
+    tier0_engine, tmp_path
+):
+    """save_graph's atomic os.replace bumps mtime → next load
+    is a cache miss → fresh instance. Validates that mutations
+    via annotate (load → mutate → save) propagate correctly to
+    subsequent readers."""
+    _load_graph_cached.cache_clear()
+    gid = "0123456789ab"
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    e1 = load_graph(gid, cache_root=tmp_path)
+    # 10ms guarantees distinct mtime_ns on any modern filesystem.
+    time.sleep(0.01)
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    e2 = load_graph(gid, cache_root=tmp_path)
+    assert e1 is not e2
+
+
+def test_load_graph_distinct_graph_ids_get_distinct_entries(
+    tier0_engine, tmp_path
+):
+    """Different graph_ids cache independently — no key collision."""
+    _load_graph_cached.cache_clear()
+    gid_a = "0a0a0a0a0a0a"
+    gid_b = "0b0b0b0b0b0b"
+    save_graph(tier0_engine, gid_a, cache_root=tmp_path)
+    save_graph(tier0_engine, gid_b, cache_root=tmp_path)
+    e_a = load_graph(gid_a, cache_root=tmp_path)
+    e_b = load_graph(gid_b, cache_root=tmp_path)
+    e_a_again = load_graph(gid_a, cache_root=tmp_path)
+    assert e_a is e_a_again
+    assert e_a is not e_b
+
+
+def test_load_graph_cache_info_reports_hits_and_misses(
+    tier0_engine, tmp_path
+):
+    """`_load_graph_cached.cache_info()` exposes hit/miss counts
+    — useful for debugging perf regressions. Pins the contract
+    that the cache actually fires (not just appears to)."""
+    _load_graph_cached.cache_clear()
+    gid = "0c0c0c0c0c0c"
+    save_graph(tier0_engine, gid, cache_root=tmp_path)
+    load_graph(gid, cache_root=tmp_path)  # miss
+    load_graph(gid, cache_root=tmp_path)  # hit
+    load_graph(gid, cache_root=tmp_path)  # hit
+    info = _load_graph_cached.cache_info()
+    assert info.hits == 2
+    assert info.misses == 1
+
+
+def test_load_graph_missing_file_raises_filenotfound_after_3_12(
+    tmp_path,
+):
+    """Pre-3.12 behavior preserved: missing engine.pkl raises
+    FileNotFoundError. Validation/error path unchanged after the
+    cache refactor — failure surfaces at the outer wrapper, not
+    deep in pickle.load."""
+    with pytest.raises(FileNotFoundError):
+        load_graph("0d0d0d0d0d0d", cache_root=tmp_path)

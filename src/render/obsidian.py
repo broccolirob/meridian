@@ -5,7 +5,11 @@ from typing import Any
 import yaml
 
 from src.graph.persist import CACHE_ROOT
-from src.render.mermaid import render_call_graph, render_inheritance
+from src.render.mermaid import (
+    render_call_graph,
+    render_inheritance,
+    render_sequence,
+)
 from src.tools import get_node, list_nodes
 
 _log = logging.getLogger(__name__)
@@ -408,5 +412,85 @@ def render_and_write_node_note(
     frontmatter, body_text = render_node_note(node, ctx, body)
     written = write_obsidian_note(
         vault_path, rel_path, frontmatter, body_text
+    )
+    return str(written)
+
+
+def render_and_write_flow_note(
+    vault_path: str | Path,
+    graph_id: str,
+    entrypoint_node: dict[str, Any],
+    paths: list[list[str]],
+    overview: str = "",
+    observations: list[str] | None = None,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Render a flow note + write to `vault/flows/<name>.md` in
+    one atomic call.
+
+    `entrypoint_node` is a Trailmark node dict (from `get_node`).
+    `paths` is a list of caller-chosen call chains; each chain is
+    `[entrypoint_id, ..., sink_id]`. One Mermaid sequence diagram
+    is rendered per path.
+
+    Body layout:
+        ## Overview         ← overview parameter (LLM prose)
+        ## Paths
+          ### Path N — entry → sink
+          ```mermaid sequenceDiagram ... ```
+        ## Observations    ← bullet list (skipped when empty)
+
+    Empty `paths` produces a placeholder Paths section — the note
+    still ships. Per-path diagram failures (bad node IDs, etc.)
+    log and emit an inline placeholder for that path.
+
+    Returns the absolute file path as a string (LLM-friendly).
+    """
+    bare = entrypoint_node["name"]
+    rel_path = f"flows/{bare}.md"
+
+    frontmatter: dict[str, Any] = {
+        "type": "flow",
+        "name": bare,
+        "entrypoint": entrypoint_node["id"],
+        "path_count": len(paths),
+    }
+
+    parts: list[str] = [_render_overview(overview), "\n"]
+    if paths:
+        parts.append("## Paths\n\n")
+        for i, path in enumerate(paths, 1):
+            sink_bare = path[-1].rsplit(":", 1)[-1].rsplit(".", 1)[-1]
+            parts.append(f"### Path {i} — {bare} → {sink_bare}\n\n")
+            try:
+                parts.append(
+                    render_sequence(graph_id, path, cache_root=cache_root)
+                )
+            except Exception as e:
+                _log.warning(
+                    "sequence render failed for path %d (%s): %s",
+                    i,
+                    path,
+                    e,
+                )
+                parts.append(
+                    f"_Sequence diagram unavailable: {e}_\n\n"
+                )
+            parts.append("\n")
+    else:
+        parts.append(
+            "## Paths\n\n"
+            "_No multi-hop paths from this entrypoint in the graph._\n\n"
+        )
+
+    if observations:
+        parts.append("## Observations\n\n")
+        for obs in observations:
+            parts.append(f"- {obs}\n")
+
+    body = "".join(parts)
+    written = write_obsidian_note(
+        vault_path, rel_path, frontmatter, body
     )
     return str(written)

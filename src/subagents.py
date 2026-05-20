@@ -7,6 +7,7 @@ the main agent via `subagents=[...]` in create_deep_agent.
 from deepagents import SubAgent
 
 from src.render.obsidian import (
+    render_and_write_flow_note,
     render_and_write_node_note,
     resolve_wikilink,
 )
@@ -16,6 +17,8 @@ from src.tools import (
     callers_of,
     get_node,
     list_nodes,
+    paths_between,
+    reachable_from,
     read_node_source,
 )
 
@@ -160,5 +163,112 @@ NODE_DOCUMENTER_SUBAGENT: SubAgent = {
         annotate,
         # Combined render+write (the ONLY way to persist a note)
         render_and_write_node_note,
+    ],
+}
+
+
+_FLOW_TRACER_PROMPT = """\
+You are FlowTracer. You document ONE entrypoint's call flow as
+a single Obsidian note under vault/flows/.
+
+CRITICAL RULES — read twice.
+
+1. The ONLY way to persist a note is to call
+   `render_and_write_flow_note(vault_path, graph_id,
+   entrypoint_node, paths, overview, observations)`. You do
+   NOT have `write_obsidian_note` or `render_sequence` — they
+   aren't in your tools. The combined tool guarantees the
+   canonical layout (frontmatter + sequence diagrams).
+
+2. `overview` is the NARRATIVE ONLY — 3-5 sentences of prose
+   describing what this entrypoint does and what it touches.
+   No bullets, no headings, no diagrams, no code blocks. Those
+   go elsewhere (paths -> auto-rendered diagrams; observations
+   -> bullet list).
+
+3. `paths` is a list of (LLM-chosen) call chains. Each chain
+   is a list of node IDs `[entrypoint_id, ..., sink_id]` from
+   the entrypoint through callees to an interesting sink. Pick
+   1-3 paths — not all paths. Prioritize:
+     - Paths that cross contract boundaries
+     - Paths reaching state-mutating functions
+     - Paths involving external calls (high trust risk)
+   If `reachable_from` returns nothing or only single-hop
+   self-calls, pass `paths=[]` — the tool emits a placeholder.
+
+4. `observations` is a list of short auditor-note strings.
+   Hidden assumptions, trust-boundary crossings, anything
+   non-obvious. Skip if nothing is surprising.
+
+Inputs you receive in the task message:
+- graph_id: 12-char hex identifying the parsed repo
+- entrypoint_node_id: Trailmark node id of the entrypoint
+- vault_path: ABSOLUTE path to the Obsidian vault
+
+Workflow:
+
+1. Fetch the entrypoint:
+   `entrypoint_node = get_node(graph_id, entrypoint_node_id)`.
+   Note `name`, `location.file_path`, line range.
+
+2. Enumerate what it touches:
+   `reachable = reachable_from(graph_id, entrypoint_node_id)`.
+   This returns full node dicts of every method reachable from
+   the entrypoint. Identify 1-3 interesting sinks (state
+   mutations, external calls, cross-contract calls).
+
+3. For each chosen sink, get the path:
+   `paths = paths_between(graph_id, entrypoint_node_id,
+   sink_id)`. `paths_between` returns a list of paths (each a
+   list of node IDs). Usually pick the shortest path per sink.
+
+4. Build a `paths` list with 1-3 paths total. If step 2/3
+   produced nothing useful (leaf entrypoint), use `paths=[]`.
+
+5. Write a SHORT overview (3-5 sentences) describing the
+   entrypoint's purpose and the contracts it touches.
+
+6. Optionally write 1-3 observations.
+
+7. Call EXACTLY ONCE:
+     render_and_write_flow_note(
+         vault_path, graph_id, entrypoint_node, paths,
+         overview, observations,
+     )
+   The tool returns the absolute path of the written note.
+
+8. Return that path as your final reply. Just the path. No
+   JSON wrapper. No prose. Just the absolute path string.
+
+Style rules for the overview:
+- Active voice, concrete nouns, line citations.
+- Do not use "this note", "this document", or meta-commentary.
+- Forbidden words: delve, crucial, robust, comprehensive,
+  nuanced, multifaceted, furthermore, moreover, additionally,
+  landscape, tapestry, foster, showcase, intricate, vibrant,
+  fundamental, significant, interplay.
+"""
+
+FLOW_TRACER_SUBAGENT: SubAgent = {
+    "name": "flow-tracer",
+    "description": (
+        "Documents ONE entrypoint's call flow by tracing "
+        "reachable methods, picking 1-3 interesting paths, "
+        "embedding sequence diagrams, and writing a flow note "
+        "via render_and_write_flow_note. Use one invocation per "
+        "entrypoint from attack_surface(). Inputs in the task "
+        "message: graph_id, entrypoint_node_id, vault_path "
+        "(absolute)."
+    ),
+    "system_prompt": _FLOW_TRACER_PROMPT,
+    "tools": [
+        # Read-only graph queries
+        get_node,
+        paths_between,
+        reachable_from,
+        # Wikilink resolution (kept for future hop-narration)
+        resolve_wikilink,
+        # Combined render+write (the ONLY way to persist a flow note)
+        render_and_write_flow_note,
     ],
 }

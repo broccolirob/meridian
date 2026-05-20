@@ -181,3 +181,46 @@ def test_dispatch_rejects_zero_or_negative_per_invoke_timeout(
                 concurrency_cap=1,
                 per_invoke_timeout=bad,
             )
+
+
+# --- node_id allowlist validation (chunk 3.14) ----------------------
+
+
+def test_invoke_one_validates_node_id():
+    """The validator is the single trust-boundary check for
+    LLM-facing prompts. Rejects backticks, newlines, semicolons,
+    spaces, and overly long inputs."""
+    from src.agent import _invoke_one
+
+    fake_agent = object()
+    bad_ids = [
+        "back`tick",            # backtick — escapes prompt fence
+        "new\nline",            # newline — escapes the line
+        "tab\there",            # tab
+        "space here",           # space
+        "semi;colon",           # semicolon
+        "unicode break",   # U+2028 LINE SEPARATOR
+        "",                     # empty
+        "x" * 501,              # too long (501 chars > 500 cap)
+    ]
+    for bad in bad_ids:
+        with pytest.raises(ValueError, match="invalid node_id"):
+            _invoke_one(fake_agent, "abc012345678", bad, "/v")
+
+
+def test_invoke_one_accepts_real_trailmark_ids():
+    """Real Tier 0/1 node IDs must pass validation unchanged."""
+    from src.agent import _validate_node_id
+
+    real_ids = [
+        "src.tokens.ERC4626:ERC4626",
+        "src.tokens.ERC4626:ERC4626.deposit",
+        "contracts.UniswapV2Pair:UniswapV2Pair",
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+        "contracts.interfaces.IUniswapV2Pair:IUniswapV2Pair",
+        "contracts.libraries.SafeMath:SafeMath",
+        "contracts.libraries.SafeMath",  # module-kind node
+    ]
+    for nid in real_ids:
+        _validate_node_id(nid)  # must not raise

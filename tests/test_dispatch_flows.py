@@ -183,3 +183,14 @@ def test_dispatch_flows_rejects_zero_or_negative_per_invoke_timeout(
                 concurrency_cap=1,
                 per_invoke_timeout=bad,
             )
+
+
+def test_invoke_one_flow_validates_entrypoint_id():
+    """Same allowlist applies to FlowTracer's entrypoint_id
+    (chunk 3.14)."""
+    from src.agent import _invoke_one_flow
+
+    fake_agent = object()
+    for bad in ("back`tick", "new\nline", "", "space x"):
+        with pytest.raises(ValueError, match="invalid node_id"):
+            _invoke_one_flow(fake_agent, "abc012345678", bad, "/v")

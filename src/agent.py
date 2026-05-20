@@ -22,6 +22,7 @@ Three public entry points:
 
 import concurrent.futures
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -38,6 +39,16 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_CONCURRENCY_CAP = 5
+# Allowlist of characters permitted in node IDs entering the
+# agent's LLM prompt surface (chunk 3.14). Today's Trailmark
+# Solidity IDs match this exactly. If we add support for
+# languages whose identifiers contain other characters, expand
+# here AND add a regression test.
+_NODE_ID_RE = re.compile(r"^[A-Za-z0-9_:.]+$")
+# Bound the input so a pathological repo can't bloat the prompt
+# or memory. Real Trailmark IDs cap around 100 chars; 500 is
+# generous headroom.
+_MAX_NODE_ID_LEN = 500
 # Per-invocation timeout (seconds) for one agent.invoke() call.
 # Chunk 3.11 closes the chunk 3.5 hang: gpt-5-mini calls typically
 # take 5-15s; 600s is the deadline beyond which we declare the
@@ -211,11 +222,40 @@ def _gather_with_per_invoke_timeout(
                 pending.discard(future)
 
 
+def _validate_node_id(node_id: str) -> None:
+    """Allowlist validation for node IDs entering the agent's
+    LLM prompt surface (chunk 3.14). Defends against prompt
+    injection via backticks, newlines, or other chars that could
+    escape the backtick-quoted fence in `_invoke_one*` task
+    messages.
+
+    Today's Solidity IDs match `[A-Za-z0-9_:.]+` exactly (probed
+    against Tier 0/1 fixtures). If Trailmark grows other-language
+    support whose identifiers contain other characters, expand
+    `_NODE_ID_RE` AND add a regression test for the new shape.
+
+    Raises ValueError on any mismatch — the calling try/except in
+    `dispatch_*._try_one` records it as a per-node failure and
+    the dispatch continues.
+    """
+    if not node_id or len(node_id) > _MAX_NODE_ID_LEN:
+        raise ValueError(
+            f"invalid node_id length: {len(node_id)} (must be "
+            f"1..{_MAX_NODE_ID_LEN})"
+        )
+    if not _NODE_ID_RE.fullmatch(node_id):
+        raise ValueError(
+            f"invalid node_id {node_id!r}: must match "
+            f"{_NODE_ID_RE.pattern}"
+        )
+
+
 def _invoke_one(
     agent: Any, graph_id: str, node_id: str, vault_path: str
 ) -> dict[str, Any]:
     """Single agent invocation for one node. Exceptions bubble up
     to dispatch_topo, which records them per-node."""
+    _validate_node_id(node_id)
     task_msg = (
         f"Document the node `{node_id}` in graph `{graph_id}`. "
         f"vault_path (absolute) = {vault_path}. "
@@ -360,6 +400,7 @@ def _invoke_one_flow(
 ) -> dict[str, Any]:
     """Single agent invocation for one entrypoint. Exceptions bubble
     up to dispatch_flows, which records them per-entrypoint."""
+    _validate_node_id(entrypoint_id)
     task_msg = (
         f"Trace the entrypoint `{entrypoint_id}` in graph "
         f"`{graph_id}`. vault_path (absolute) = {vault_path}. "

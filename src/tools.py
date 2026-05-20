@@ -1,3 +1,4 @@
+import copy
 import json
 import threading
 from pathlib import Path
@@ -165,7 +166,21 @@ def annotate(
     duplicate). Persists changes via save_graph."""
     kind_enum = _to_annotation_kind(kind)
     with _ANNOTATE_LOCK:
-        engine = load_graph(graph_id, cache_root=cache_root)
+        # Deep-copy the cached instance before mutating (chunk
+        # 3.18, /review C-NEW-3). The chunk 3.16 C6 lru_cache
+        # makes every worker share the SAME QueryEngine
+        # reference; concurrent unlocked readers iterate
+        # engine._store._graph.annotations (and other internal
+        # dicts) while this write runs. Mutating that shared
+        # reference in-place would race with reader iteration
+        # (RuntimeError: dictionary changed size during
+        # iteration). save_graph below bumps file mtime via
+        # atomic os.replace, which invalidates the mtime-keyed
+        # lru_cache so subsequent readers re-load from disk and
+        # see the new state.
+        engine = copy.deepcopy(
+            load_graph(graph_id, cache_root=cache_root)
+        )
         result = engine.annotate(
             node_id, kind_enum, description, source=source
         )
@@ -211,7 +226,11 @@ def clear_annotations(
     without, all annotations on the node. Persists via save_graph."""
     kind_enum = _to_annotation_kind(kind) if kind is not None else None
     with _ANNOTATE_LOCK:
-        engine = load_graph(graph_id, cache_root=cache_root)
+        # Deep-copy before mutating (see `annotate` for the
+        # chunk 3.18 C-NEW-3 rationale).
+        engine = copy.deepcopy(
+            load_graph(graph_id, cache_root=cache_root)
+        )
         result = engine.clear_annotations(node_id, kind=kind_enum)
         save_graph(engine, graph_id, cache_root=cache_root)
     return result

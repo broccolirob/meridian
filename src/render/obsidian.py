@@ -88,6 +88,45 @@ KIND_TO_FOLDER: dict[str, str] = {
 }
 
 
+def _disambiguated_path(
+    node: dict[str, Any],
+    graph_id: str,
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Vault-relative path stem (no `.md`) for a node note.
+
+    Returns `<folder>/<bare>` when the bare name is unique among
+    nodes routing to the same folder, or
+    `<folder>/<module>.<bare>` when a collision exists. Per-folder
+    (not per-kind) because `KIND_TO_FOLDER` maps multiple kinds to
+    the same folder (contract/struct/enum → contracts).
+
+    Used by both `render_and_write_node_note` (the file's path)
+    and `resolve_wikilink` (the link target) so they stay in
+    sync — wikilinks always point at whatever filename the writer
+    picks.
+    """
+    kind = node["kind"]
+    folder = KIND_TO_FOLDER.get(kind, "contracts")
+    bare = node["name"]
+
+    same_folder_kinds = {
+        k for k, f in KIND_TO_FOLDER.items() if f == folder
+    }
+    others = [
+        n
+        for n in list_nodes(graph_id, cache_root=cache_root)
+        if n["kind"] in same_folder_kinds
+        and n["name"] == bare
+        and n["id"] != node["id"]
+    ]
+    if not others:
+        return f"{folder}/{bare}"
+    module = node["id"].rsplit(":", 1)[0]
+    return f"{folder}/{module}.{bare}"
+
+
 def resolve_wikilink(
     graph_id: str,
     node_id: str,
@@ -102,6 +141,12 @@ def resolve_wikilink(
     Methods point at their parent's note with a qualified display
     label: ``[[contracts/Pair|Pair.swap]]``.
 
+    When two nodes route to the same folder with the same bare
+    name (collision case from chunk 3.10), the link target gets
+    qualified with the module prefix
+    (``[[contracts/contracts.A.Vault|Vault]]``). The display
+    label stays bare.
+
     Raises `KeyError` if `node_id` (or, for methods, its parent) is
     not in the cached graph.
     """
@@ -112,14 +157,14 @@ def resolve_wikilink(
     if kind == "method":
         parent_id = node_id.rsplit(".", 1)[0]
         parent = get_node(graph_id, parent_id, cache_root=cache_root)
-        folder = KIND_TO_FOLDER.get(parent["kind"], "contracts")
         method_name = name.rsplit(".", 1)[-1]
-        return (
-            f"[[{folder}/{parent['name']}|{parent['name']}.{method_name}]]"
+        parent_path = _disambiguated_path(
+            parent, graph_id, cache_root=cache_root
         )
+        return f"[[{parent_path}|{parent['name']}.{method_name}]]"
 
-    folder = KIND_TO_FOLDER.get(kind, "contracts")
-    return f"[[{folder}/{name}|{name}]]"
+    path = _disambiguated_path(node, graph_id, cache_root=cache_root)
+    return f"[[{path}|{name}]]"
 
 
 _VISIBILITY_ORDER: tuple[str, ...] = ("external", "public", "internal", "private")
@@ -407,8 +452,24 @@ def render_and_write_node_note(
             e,
         )
 
-    folder = KIND_TO_FOLDER.get(kind, "contracts")
-    rel_path = f"{folder}/{node['name']}.md"
+    # Filename disambiguation (chunk 3.10) needs the graph to
+    # detect bare-name collisions. Same graceful fallback as the
+    # diagram block above — if the graph isn't loadable (bad gid,
+    # test fixture), use the bare path. Pre-3.10 behavior.
+    try:
+        rel_path = (
+            f"{_disambiguated_path(node, graph_id, cache_root=cache_root)}"
+            f".md"
+        )
+    except Exception as e:
+        _log.warning(
+            "filename disambiguation failed for %s: %s — using "
+            "bare path",
+            node["id"],
+            e,
+        )
+        folder = KIND_TO_FOLDER.get(kind, "contracts")
+        rel_path = f"{folder}/{node['name']}.md"
     frontmatter, body_text = render_node_note(node, ctx, body)
     written = write_obsidian_note(
         vault_path, rel_path, frontmatter, body_text
@@ -448,7 +509,17 @@ def render_and_write_flow_note(
     Returns the absolute file path as a string (LLM-friendly).
     """
     bare = entrypoint_node["name"]
-    rel_path = f"flows/{bare}.md"
+    # Always qualify with the containing class so two entrypoints
+    # with the same method name (e.g. UniswapV2Pair.swap vs
+    # IUniswapV2Pair.swap, which both appear on Tier 1's attack
+    # surface) land in distinct files. The bare method name alone
+    # isn't auditor-meaningful for a flow note anyway.
+    tail = entrypoint_node["id"].rsplit(":", 1)[-1]
+    parent = tail.rsplit(".", 1)[0] if "." in tail else None
+    if parent and parent != bare:
+        rel_path = f"flows/{parent}.{bare}.md"
+    else:
+        rel_path = f"flows/{bare}.md"
 
     frontmatter: dict[str, Any] = {
         "type": "flow",

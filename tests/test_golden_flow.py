@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-GOLDEN_FLOW = Path(__file__).parent / "golden" / "flows" / "swap.md"
+GOLDEN_FLOW = (
+    Path(__file__).parent
+    / "golden"
+    / "flows"
+    / "UniswapV2Pair.swap.md"
+)
 
 REQUIRED_FRONTMATTER_KEYS = {
     "type",

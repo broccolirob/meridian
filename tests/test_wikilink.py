@@ -82,3 +82,33 @@ def test_routing_table_covers_all_trailmark_top_level_kinds():
 
 def test_routing_table_does_not_route_method():
     assert "method" not in KIND_TO_FOLDER
+
+
+def test_resolve_wikilink_qualifies_target_on_collision(
+    monkeypatch, tier0_graph_id
+):
+    """Chunk 3.10: when two nodes share a bare name in the same
+    folder, resolve_wikilink must point at the qualified
+    filename — otherwise the link breaks for the second node."""
+    from src.render import obsidian
+
+    gid, cache_root = tier0_graph_id
+    sibling = {
+        "id": "vendored.ERC20:ERC20",
+        "name": "ERC20",
+        "kind": "contract",
+    }
+    real_list_nodes = obsidian.list_nodes
+
+    def patched(graph_id, *, kind=None, cache_root=None):
+        return real_list_nodes(
+            graph_id, kind=kind, cache_root=cache_root
+        ) + [sibling]
+
+    monkeypatch.setattr(obsidian, "list_nodes", patched)
+
+    link = resolve_wikilink(
+        gid, "src.tokens.ERC20:ERC20", cache_root=cache_root
+    )
+    # Qualified target, bare display label.
+    assert link == "[[contracts/src.tokens.ERC20.ERC20|ERC20]]"

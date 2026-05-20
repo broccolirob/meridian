@@ -242,3 +242,66 @@ def test_diagrams_appear_above_link_lists(
     inherits_list_pos = text.find("### Inheritance\n")
     call_graph_pos = text.find("### Call graph")
     assert inheritance_diag_pos < call_graph_pos < inherits_list_pos
+
+
+# --- C2: filename disambiguation on collision (chunk 3.10) -------
+
+
+def test_node_note_qualifies_filename_on_bare_name_collision(
+    monkeypatch, tier0_graph_id, tmp_path
+):
+    """Two nodes routing to the same folder with the same bare
+    name must produce distinct files. Tier 0 has no real
+    collisions, so we synthesize one by patching list_nodes."""
+    from src.render import obsidian
+    from src.render.obsidian import render_and_write_node_note
+    from src.tools import get_node
+
+    gid, cache_root = tier0_graph_id
+    erc20 = get_node(
+        gid, "src.tokens.ERC20:ERC20", cache_root=cache_root
+    )
+    # Synthesize a second contract that shares ERC20's bare name
+    # but lives in a different module. The disambiguation logic
+    # only inspects bare name + kind + module, so a minimal dict
+    # suffices.
+    sibling = {
+        "id": "vendored.ERC20:ERC20",
+        "name": "ERC20",
+        "kind": "contract",
+    }
+
+    real_list_nodes = obsidian.list_nodes
+
+    def patched(graph_id, *, kind=None, cache_root=None):
+        nodes = real_list_nodes(
+            graph_id, kind=kind, cache_root=cache_root
+        )
+        return nodes + [sibling]
+
+    monkeypatch.setattr(obsidian, "list_nodes", patched)
+
+    out = render_and_write_node_note(
+        tmp_path, gid, erc20, {}, "ov", cache_root=cache_root
+    )
+    # Qualified with the real ERC20's module prefix.
+    assert out.endswith("/contracts/src.tokens.ERC20.ERC20.md")
+    # And the qualified file actually exists (no silent overwrite).
+    assert Path(out).exists()
+
+
+def test_resolve_wikilink_returns_bare_path_when_no_collision(
+    tier0_graph_id,
+):
+    """Common case: no collision → wikilink uses bare path. This
+    pins the regression armor for the no-collision case (Tier
+    0/1 production runs)."""
+    from src.render.obsidian import resolve_wikilink
+
+    gid, cache_root = tier0_graph_id
+    link = resolve_wikilink(
+        gid, "src.tokens.ERC20:ERC20", cache_root=cache_root
+    )
+    # Unchanged from pre-3.10: no qualification because ERC20 is
+    # unique among contract-folder nodes in Tier 0.
+    assert link == "[[contracts/ERC20|ERC20]]"

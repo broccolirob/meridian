@@ -70,7 +70,9 @@ def test_render_and_write_flow_note_produces_valid_note(
         cache_root=cache_root,
     )
 
-    assert out.endswith("/flows/swap.md")
+    # Chunk 3.10: filename qualified with containing contract
+    # (UniswapV2Pair.swap, not bare swap).
+    assert out.endswith("/flows/UniswapV2Pair.swap.md")
     text = Path(out).read_text()
     # Frontmatter shape
     assert "type: flow" in text
@@ -126,3 +128,43 @@ def test_render_and_write_flow_note_empty_paths_emits_placeholder(
     assert "No multi-hop paths" in text
     assert "sequenceDiagram" not in text
     assert "path_count: 0" in text
+
+
+def test_flow_note_filename_qualified_with_contract(
+    tier1_graph_id, tmp_path
+):
+    """Chunk 3.10: two Tier 1 entrypoints sharing the bare name
+    `swap` (UniswapV2Pair.swap and IUniswapV2Pair.swap on the
+    attack surface) must produce distinct files. Without
+    qualification the second write would silently overwrite
+    the first."""
+    from src.render.obsidian import render_and_write_flow_note
+    from src.tools import get_node
+
+    gid, cache_root = tier1_graph_id
+    pair_swap = get_node(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+    iface_swap = get_node(
+        gid,
+        "contracts.interfaces.IUniswapV2Pair:IUniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+
+    out_a = render_and_write_flow_note(
+        tmp_path, gid, pair_swap, paths=[], overview="contract side",
+        cache_root=cache_root,
+    )
+    out_b = render_and_write_flow_note(
+        tmp_path, gid, iface_swap, paths=[], overview="interface side",
+        cache_root=cache_root,
+    )
+
+    assert out_a.endswith("/flows/UniswapV2Pair.swap.md")
+    assert out_b.endswith("/flows/IUniswapV2Pair.swap.md")
+    assert out_a != out_b
+    # Both files exist (no silent overwrite)
+    assert Path(out_a).exists()
+    assert Path(out_b).exists()

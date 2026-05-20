@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.subagents import FLOW_TRACER_SUBAGENT
 
 
@@ -301,3 +303,95 @@ def test_sequence_render_propagates_coding_bugs(
             paths=[good_path],
             cache_root=cache_root,
         )
+
+
+# --- widened-except for legitimate cache failures (chunk 3.21 / C-NEW-6) ---
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [EOFError, OSError],
+    ids=["EOFError", "OSError"],
+)
+def test_sequence_render_recovers_from_load_graph_failures(
+    tier1_graph_id, tmp_path, monkeypatch, exc
+):
+    """Chunk 3.21 / C-NEW-6: per-path sequence rendering's
+    narrowed catch tuple was too restrictive. With one path
+    failing due to a load_graph-style exception, the flow
+    note must still ship with an inline placeholder for that
+    path. Pre-3.21 EOFError / OSError / UnpicklingError
+    aborted the entire flow-note write."""
+    from src.render.obsidian import render_and_write_flow_note
+    from src.tools import get_node
+
+    gid, cache_root = tier1_graph_id
+    swap = get_node(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+
+    def _raise(*args, **kwargs):
+        raise exc(f"simulated {exc.__name__}")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_sequence",
+        _raise,
+    )
+
+    good_path = [
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+    ]
+
+    out = render_and_write_flow_note(
+        tmp_path,
+        gid,
+        swap,
+        paths=[good_path],
+        cache_root=cache_root,
+    )
+    assert Path(out).exists()
+    assert "Sequence diagram unavailable" in Path(out).read_text()
+
+
+def test_sequence_render_recovers_from_unpickling_error(
+    tier1_graph_id, tmp_path, monkeypatch
+):
+    """pickle.UnpicklingError variant for the sequence-render
+    block."""
+    import pickle
+
+    from src.render.obsidian import render_and_write_flow_note
+    from src.tools import get_node
+
+    gid, cache_root = tier1_graph_id
+    swap = get_node(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+
+    def _raise(*args, **kwargs):
+        raise pickle.UnpicklingError("simulated UnpicklingError")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_sequence",
+        _raise,
+    )
+
+    good_path = [
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+    ]
+
+    out = render_and_write_flow_note(
+        tmp_path,
+        gid,
+        swap,
+        paths=[good_path],
+        cache_root=cache_root,
+    )
+    assert Path(out).exists()
+    assert "Sequence diagram unavailable" in Path(out).read_text()

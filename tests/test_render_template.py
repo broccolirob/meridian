@@ -648,3 +648,149 @@ def test_pick_primary_method_requires_dot_separator(monkeypatch):
         ],
     )
     assert _pick_primary_method("abc012345678", "src.X:X") is None
+
+
+# --- widened-except for legitimate cache failures (chunk 3.21 / C-NEW-6) ---
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [EOFError, OSError],
+    ids=["EOFError", "OSError"],
+)
+def test_diagram_block_recovers_from_load_graph_failures(
+    erc20_contract, tmp_path, monkeypatch, exc
+):
+    """Chunk 3.21 / C-NEW-6: chunk 3.16 I17's narrowed catch
+    tuple was too restrictive. load_graph can raise EOFError
+    (torn pickle), pickle.UnpicklingError (corrupted cache),
+    or OSError (NFS hiccup, permission denied) — all
+    legitimate filesystem failures that the diagram block
+    should recover from gracefully, not propagate.
+
+    Pre-3.21 these exceptions aborted the entire writer; the
+    dispatcher recorded the node as failed. Post-3.21 the
+    catch tuple is widened to include them, so the note
+    ships with no diagrams (the chunk 3.5 design's
+    fallback)."""
+    def _raise(*args, **kwargs):
+        raise exc(f"simulated {exc.__name__}")
+
+    monkeypatch.setattr("src.render.obsidian.render_inheritance", _raise)
+    # Stub disambiguation so it doesn't ALSO fail.
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [],
+    )
+
+    out = render_and_write_node_note(
+        tmp_path,
+        "abc123456789",
+        erc20_contract,
+        {},
+        "ov",
+    )
+    assert Path(out).exists()
+    assert "```mermaid" not in Path(out).read_text()
+
+
+def test_diagram_block_recovers_from_unpickling_error(
+    erc20_contract, tmp_path, monkeypatch
+):
+    """pickle.UnpicklingError variant — separate (not
+    parametrized) because pickle isn't a top-level test-file
+    import."""
+    import pickle
+
+    def _raise(*args, **kwargs):
+        raise pickle.UnpicklingError("simulated UnpicklingError")
+
+    monkeypatch.setattr("src.render.obsidian.render_inheritance", _raise)
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [],
+    )
+
+    out = render_and_write_node_note(
+        tmp_path,
+        "abc123456789",
+        erc20_contract,
+        {},
+        "ov",
+    )
+    assert Path(out).exists()
+    assert "```mermaid" not in Path(out).read_text()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [EOFError, OSError],
+    ids=["EOFError", "OSError"],
+)
+def test_disambiguation_block_recovers_from_load_graph_failures(
+    erc20_contract, tmp_path, monkeypatch, exc
+):
+    """Same widening for the filename-disambiguation block —
+    if `_disambiguated_path` raises an OSError / EOFError /
+    UnpicklingError (via its `list_nodes` → `load_graph`
+    call chain), fall back to the bare path. Pre-3.21 these
+    aborted the writer."""
+    def _raise(*args, **kwargs):
+        raise exc(f"simulated {exc.__name__}")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_inheritance",
+        lambda *a, **k: "",
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._pick_primary_method",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._disambiguated_path",
+        _raise,
+    )
+
+    out = render_and_write_node_note(
+        tmp_path,
+        "abc123456789",
+        erc20_contract,
+        {},
+        "ov",
+    )
+    assert Path(out).exists()
+    assert out.endswith("/contracts/ERC20.md")
+
+
+def test_disambiguation_block_recovers_from_unpickling_error(
+    erc20_contract, tmp_path, monkeypatch
+):
+    """pickle.UnpicklingError variant for the disambiguation
+    block."""
+    import pickle
+
+    def _raise(*args, **kwargs):
+        raise pickle.UnpicklingError("simulated UnpicklingError")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_inheritance",
+        lambda *a, **k: "",
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._pick_primary_method",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._disambiguated_path",
+        _raise,
+    )
+
+    out = render_and_write_node_note(
+        tmp_path,
+        "abc123456789",
+        erc20_contract,
+        {},
+        "ov",
+    )
+    assert Path(out).exists()
+    assert out.endswith("/contracts/ERC20.md")

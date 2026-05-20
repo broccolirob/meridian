@@ -1,5 +1,6 @@
 import logging
 import os
+import pickle
 import threading
 from pathlib import Path
 from typing import Annotated, Any
@@ -486,7 +487,14 @@ def render_and_write_node_note(
             ctx["call_graph_mermaid"] = render_call_graph(
                 graph_id, primary, cache_root=cache_root
             )
-    except (KeyError, FileNotFoundError, ValueError) as e:
+    except (
+        KeyError,
+        FileNotFoundError,
+        ValueError,
+        OSError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as e:
         _log.warning(
             "diagram computation failed for %s: %s — proceeding "
             "without diagrams",
@@ -506,7 +514,14 @@ def render_and_write_node_note(
             f"{_disambiguated_path(node, graph_id, cache_root=cache_root)}"
             f".md"
         )
-    except (KeyError, FileNotFoundError, ValueError) as e:
+    except (
+        KeyError,
+        FileNotFoundError,
+        ValueError,
+        OSError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as e:
         _log.warning(
             "filename disambiguation failed for %s: %s — using "
             "bare path",
@@ -583,7 +598,14 @@ def render_and_write_flow_note(
                 parts.append(
                     render_sequence(graph_id, path, cache_root=cache_root)
                 )
-            except (KeyError, FileNotFoundError, ValueError) as e:
+            except (
+                KeyError,
+                FileNotFoundError,
+                ValueError,
+                OSError,
+                EOFError,
+                pickle.UnpicklingError,
+            ) as e:
                 # Chunk 3.16 I17: narrowed from `except Exception`.
                 # KeyError (bad node ID in path), FileNotFoundError
                 # (missing graph cache), ValueError (render_sequence

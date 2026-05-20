@@ -41,6 +41,23 @@ def _bare_name(node_id: str) -> str:
     return node_id.rsplit(":", 1)[-1]
 
 
+def _containing_class(node_id: str) -> str:
+    """Containing-class name. `module:Contract.method` →
+    `Contract`. `module:Contract` (top-level) → `Contract`."""
+    bare = _bare_name(node_id)
+    return bare.rsplit(".", 1)[0]
+
+
+def _method_or_name(node_id: str) -> str:
+    """Sequence-arrow label. `module:Contract.method` → `method`.
+    `module:Contract` (top-level, no `.` in the bare name) →
+    the bare name (caller's intent must be the whole node)."""
+    bare = _bare_name(node_id)
+    if "." in bare:
+        return bare.rsplit(".", 1)[1]
+    return bare
+
+
 def _quoted_label(label: str) -> str:
     """Wrap a label in Mermaid double quotes if it contains chars
     Mermaid would otherwise mis-parse (spaces, parens, etc.).
@@ -275,5 +292,65 @@ def render_inheritance(
         lines.append(f"    {parent_name} {style} {focus_bare}")
     for child_name, style in sorted(children):
         lines.append(f"    {focus_bare} {style} {child_name}")
+    lines.append("```")
+    return "\n".join(lines) + "\n"
+
+
+def render_sequence(
+    graph_id: str,
+    path: list[str],
+    *,
+    cache_root: Path = CACHE_ROOT,
+) -> str:
+    """Render a Mermaid `sequenceDiagram` of a single call chain.
+
+    `path` is a list of node IDs in call order: `path[0]` is the
+    initial caller, `path[i]` calls `path[i+1]`. Each consecutive
+    pair produces one arrow. The participants are the unique
+    containing-class names, declared in first-appearance order so
+    the visual reads left-to-right as the call narrative.
+
+    Self-calls (consecutive nodes with the same containing class)
+    render as Mermaid self-loops (`A->>A: method`).
+
+    Returns a fenced Mermaid block. A single-node path emits just
+    the participant declaration; no arrows.
+
+    The renderer is path-agnostic: it does NOT verify consecutive
+    nodes are connected by a `calls` edge. That contract belongs
+    to the caller (typically `paths_between`). This separation
+    keeps the renderer reusable for hypothesized paths during
+    investigation.
+
+    Raises:
+        ValueError: if `path` is empty.
+        KeyError: if any node ID in `path` isn't in the cached
+            graph (validated as one load_graph round-trip, so
+            the cost is constant in path length).
+    """
+    if not path:
+        raise ValueError("path must be non-empty")
+
+    engine = load_graph(graph_id, cache_root=cache_root)
+    data = json.loads(engine.to_json())
+    nodes_by_id: dict[str, dict[str, Any]] = data["nodes"]
+    for nid in path:
+        if nid not in nodes_by_id:
+            raise KeyError(nid)
+
+    # Ordered-unique set: dict preserves insertion order (Python
+    # 3.7+), so iterating keys gives first-appearance ordering.
+    participants: dict[str, None] = {}
+    for nid in path:
+        participants[_containing_class(nid)] = None
+
+    lines = ["```mermaid", "sequenceDiagram"]
+    for name in participants:
+        lines.append(f"    participant {name}")
+    for i in range(len(path) - 1):
+        src_part = _containing_class(path[i])
+        dst_part = _containing_class(path[i + 1])
+        dst_label = _method_or_name(path[i + 1])
+        lines.append(f"    {src_part}->>{dst_part}: {dst_label}")
     lines.append("```")
     return "\n".join(lines) + "\n"

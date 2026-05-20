@@ -168,3 +168,91 @@ def test_flow_note_filename_qualified_with_contract(
     # Both files exist (no silent overwrite)
     assert Path(out_a).exists()
     assert Path(out_b).exists()
+
+
+# --- per-path render failure (chunk 3.16, /review I8) -----------------
+
+
+def test_render_and_write_flow_note_continues_past_bad_path(
+    tier1_graph_id, tmp_path, caplog
+):
+    """One bad path in a multi-path list must NOT abort the
+    flow note. The chunk 3.7 design adds an inline
+    `_Sequence diagram unavailable_` placeholder + warning so
+    the dispatch loop can still ship a partial note.
+
+    Two failure modes are exercised in one test:
+      1. `render_sequence` raises (unknown node in the path
+         → KeyError in its validation loop) → inline placeholder.
+      2. `resolve_wikilink` raises KeyError for an individual
+         hop → backticked bare-name fallback in Hops list.
+
+    Pre-3.16 neither branch was tested — a regression that
+    re-raised instead of falling back would silently break
+    dispatch_flows for any flow containing one bad path."""
+    import logging
+
+    from src.render.obsidian import render_and_write_flow_note
+    from src.tools import get_node
+
+    gid, cache_root = tier1_graph_id
+    swap = get_node(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+
+    good_path = [
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+    ]
+    # Second hop is unknown — render_sequence raises KeyError;
+    # resolve_wikilink on the same hop also raises KeyError.
+    bad_path = [
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "module.fake:NotARealNode",
+    ]
+
+    caplog.set_level(logging.WARNING, logger="src.render.obsidian")
+
+    out = render_and_write_flow_note(
+        tmp_path,
+        gid,
+        swap,
+        paths=[good_path, bad_path],
+        overview="testing partial-failure resilience",
+        cache_root=cache_root,
+    )
+
+    text = Path(out).read_text()
+
+    # The note shipped with both paths represented.
+    assert "path_count: 2" in text
+
+    # Path 1: real sequence diagram rendered.
+    assert "### Path 1 — swap → _safeTransfer" in text
+    # Exactly ONE sequenceDiagram block in the entire note
+    # (path 2 fell back to the placeholder).
+    assert text.count("sequenceDiagram") == 1
+
+    # Path 2: inline placeholder (NOT a sequence diagram).
+    assert "### Path 2 — swap → NotARealNode" in text
+    assert "Sequence diagram unavailable" in text
+
+    # Both paths still have Hops sections — the Hops loop runs
+    # independently of the sequence-render try/except.
+    assert text.count("**Hops:**") == 2
+
+    # Path 2's Hops list falls back to backticked bare-name for
+    # the unresolvable hop (resolve_wikilink raised KeyError).
+    assert "`NotARealNode` (no contract note)" in text
+    # Path 1's first hop still resolves (it's a real method).
+    assert "[[contracts/UniswapV2Pair|UniswapV2Pair.swap]]" in text
+
+    # Warning fired with diagnostic detail (path index + reason).
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any(
+        "sequence render failed for path 2" in m
+        and "NotARealNode" in m
+        for m in warnings
+    ), f"expected per-path failure warning; got {warnings}"

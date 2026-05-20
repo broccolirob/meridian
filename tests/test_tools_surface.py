@@ -1,3 +1,5 @@
+import pytest
+
 from src.tools import (
     attack_surface,
     complexity_hotspots,
@@ -169,3 +171,30 @@ def test_complexity_hotspots_returns_node_dicts(tier1_graph_id):
         "kind",
         "cyclomatic_complexity",
     } <= sample.keys()
+
+
+def test_complexity_hotspots_rejects_negative_threshold(tier1_graph_id):
+    """Chunk 3.16 /review I12: cyclomatic complexity is
+    non-negative, so a negative threshold would match every
+    method — almost certainly a caller-side bug. Reject with
+    ValueError, matching the same validation in
+    `render_complexity_heatmap` (src/render/mermaid.py:415)
+    so both surfaces of the heatmap pipeline reject the same
+    bad input."""
+    gid, cache_root = tier1_graph_id
+    for bad in (-1, -10, -100):
+        with pytest.raises(ValueError, match="threshold must be >= 0"):
+            complexity_hotspots(gid, threshold=bad, cache_root=cache_root)
+
+
+def test_complexity_hotspots_accepts_threshold_zero(tier1_graph_id):
+    """threshold=0 is valid (matches all methods with non-
+    negative CC). Pins the boundary so the validation in I12
+    doesn't accidentally exclude 0."""
+    gid, cache_root = tier1_graph_id
+    # All methods have CC >= 0, so threshold=0 returns every
+    # method node in the graph. We don't assert a specific
+    # count (that's brittle to Trailmark output changes); just
+    # that it returns SOMETHING and doesn't raise.
+    hot = complexity_hotspots(gid, threshold=0, cache_root=cache_root)
+    assert len(hot) > 0

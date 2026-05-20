@@ -188,3 +188,94 @@ def test_render_call_graph_terminates_on_self_loop(monkeypatch):
     assert "X.recurse" in node_lines[0]
     assert len(edge_lines) == 1
     assert "n0 --> n0" in edge_lines[0]
+
+
+# --- _quoted_label direct unit tests (chunk 3.16, /review I11) ------
+#
+# The function is module-private and gets covered indirectly through
+# `render_call_graph` + `render_complexity_heatmap`. /review I11
+# noted that the `"`-escape branch is dead in production because
+# `_validate_node_id` excludes `"` at the trust boundary and
+# `_bare_name`-derived labels (the only inputs `_quoted_label`
+# sees today) inherit that restriction. The escape stays in
+# place — removing it would silently produce broken Mermaid
+# (`""foo""` instead of `"&quot;foo&quot;"`) if Trailmark ever
+# surfaces `"`-bearing IDs (e.g., a future language). These
+# direct tests pin every reachable AND defensive branch so the
+# escape is no longer "dead and untested".
+
+
+def test_quoted_label_passes_clean_solidity_id_unchanged():
+    """Plain Solidity identifiers (the production input shape)
+    pass through without quoting — keeps Mermaid output dense."""
+    from src.render.mermaid import _quoted_label
+
+    assert _quoted_label("UniswapV2Pair.swap") == "UniswapV2Pair.swap"
+    assert _quoted_label("ERC4626.deposit") == "ERC4626.deposit"
+    assert _quoted_label("_safeTransfer") == "_safeTransfer"
+
+
+def test_quoted_label_quotes_labels_with_special_chars():
+    """Each char in ' ()<>"|[]{}' triggers quoting individually.
+    Loops the inventory so a future addition to the escape list
+    fails this test until both sides agree."""
+    from src.render.mermaid import _quoted_label
+
+    # Each special char in isolation, embedded in a clean prefix.
+    for special in [" ", "(", ")", "<", ">", "|", "[", "]", "{", "}"]:
+        label = f"foo{special}bar"
+        result = _quoted_label(label)
+        assert result.startswith('"') and result.endswith('"'), (
+            f"label with {special!r} should be quoted; got {result!r}"
+        )
+
+
+def test_quoted_label_escapes_embedded_double_quote():
+    """The defensive `"` escape (dead in production today,
+    armored for future Trailmark expansion). Without escaping,
+    `_quoted_label('he said "hi"')` would emit
+    `"he said "hi""` — a parse error in Mermaid because the
+    inner quotes close the outer quotes. The `&quot;` entity
+    is Mermaid's HTML-entity escape syntax for embedded
+    quotes."""
+    from src.render.mermaid import _quoted_label
+
+    result = _quoted_label('he said "hi"')
+    assert result == '"he said &quot;hi&quot;"'
+    # No literal " inside the quoted body (would break Mermaid).
+    assert result.count('"') == 2, (
+        f"only the outer wrappers should be literal `\"`; got {result!r}"
+    )
+
+
+def test_quoted_label_handles_complexity_heatmap_label_shape():
+    """The other live caller (mermaid.py:451) passes
+    `f"{bare}, CC={cc}"` — a comma and space trigger quoting.
+    Pins the heatmap label shape so a label-format refactor
+    that drops the comma doesn't accidentally unquote."""
+    from src.render.mermaid import _quoted_label
+
+    assert _quoted_label("swap, CC=4") == '"swap, CC=4"'
+    assert _quoted_label("foo, CC=0") == '"foo, CC=0"'
+
+
+def test_quoted_label_returns_clean_identifier_unquoted():
+    """Boundary: identifier-only chars (the `[A-Za-z0-9_:.]+`
+    surface from `_validate_node_id`) never trigger quoting.
+    Pins that `_quoted_label` won't quote things `_bare_name`
+    extracts from valid Trailmark IDs — keeps the production
+    Mermaid output free of unnecessary quotes."""
+    from src.render.mermaid import _quoted_label
+
+    for label in [
+        "abc",
+        "a:b",
+        "a.b",
+        "a_b",
+        "module.Class.method",
+        "X:Y.z",
+        "Foo123",
+    ]:
+        assert _quoted_label(label) == label, (
+            f"clean label {label!r} should not be quoted"
+        )

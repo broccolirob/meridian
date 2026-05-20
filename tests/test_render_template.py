@@ -452,3 +452,199 @@ def test_disambiguation_block_propagates_coding_bugs(
             {},
             "ov",
         )
+
+
+# --- _pick_primary_method direct unit tests (chunk 3.16, /review I10) ---
+#
+# Pre-3.16 only exercised indirectly through the diagram block in
+# `render_and_write_node_note`. The diagram block's narrowed
+# `except (KeyError, FileNotFoundError, ValueError)` (chunk 3.16
+# I17) would swallow logic bugs that don't raise — e.g., a wrong
+# tiebreak direction would silently pick the wrong method without
+# any test failing. Direct tests on a synthetic `list_nodes`
+# response give explicit control of CC values, names, and the
+# ID-prefix relationship.
+
+
+def test_pick_primary_method_returns_none_when_no_methods(monkeypatch):
+    """Empty list_nodes result → None. A container with no
+    methods (interface stub, library-only, or a synthetic node
+    in a test fixture) is the most common None path."""
+    from src.render.obsidian import _pick_primary_method
+
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [],
+    )
+    assert _pick_primary_method("abc012345678", "src.X:X") is None
+
+
+def test_pick_primary_method_returns_none_when_no_id_prefix_match(
+    monkeypatch,
+):
+    """list_nodes returns methods but NONE start with
+    `container_id.` — none belong to this container. This
+    catches the wrong-prefix bug class (e.g., returning a
+    method of a DIFFERENT contract that happens to be in the
+    list)."""
+    from src.render.obsidian import _pick_primary_method
+
+    # Methods belong to a DIFFERENT contract (different module).
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [
+            {
+                "id": "src.Y:Y.foo",
+                "name": "foo",
+                "cyclomatic_complexity": 5,
+                "kind": "method",
+            },
+            {
+                "id": "src.Y:Y.bar",
+                "name": "bar",
+                "cyclomatic_complexity": 3,
+                "kind": "method",
+            },
+        ],
+    )
+    assert _pick_primary_method("abc012345678", "src.X:X") is None
+
+
+def test_pick_primary_method_picks_highest_cc(monkeypatch):
+    """Highest cyclomatic_complexity wins. Pins the primary
+    sort direction (descending)."""
+    from src.render.obsidian import _pick_primary_method
+
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [
+            {
+                "id": "src.X:X.simple",
+                "name": "simple",
+                "cyclomatic_complexity": 1,
+                "kind": "method",
+            },
+            {
+                "id": "src.X:X.complex",
+                "name": "complex",
+                "cyclomatic_complexity": 8,
+                "kind": "method",
+            },
+            {
+                "id": "src.X:X.medium",
+                "name": "medium",
+                "cyclomatic_complexity": 4,
+                "kind": "method",
+            },
+        ],
+    )
+    assert (
+        _pick_primary_method("abc012345678", "src.X:X")
+        == "src.X:X.complex"
+    )
+
+
+def test_pick_primary_method_tiebreaks_by_name_ascending(monkeypatch):
+    """Equal CC → alphabetical by name (ascending). Pins the
+    tiebreak direction — a wrong tiebreak would silently
+    change which method shows up in the call graph diagram."""
+    from src.render.obsidian import _pick_primary_method
+
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [
+            {
+                "id": "src.X:X.zebra",
+                "name": "zebra",
+                "cyclomatic_complexity": 5,
+                "kind": "method",
+            },
+            {
+                "id": "src.X:X.apple",
+                "name": "apple",
+                "cyclomatic_complexity": 5,
+                "kind": "method",
+            },
+            {
+                "id": "src.X:X.mango",
+                "name": "mango",
+                "cyclomatic_complexity": 5,
+                "kind": "method",
+            },
+        ],
+    )
+    # `apple` wins on alphabetical tiebreak.
+    assert (
+        _pick_primary_method("abc012345678", "src.X:X")
+        == "src.X:X.apple"
+    )
+
+
+def test_pick_primary_method_treats_missing_or_none_cc_as_zero(
+    monkeypatch,
+):
+    """Trailmark sometimes omits `cyclomatic_complexity` or
+    sets it to None for trivial methods (getters, fallbacks).
+    The sort key uses `m.get("cyclomatic_complexity") or 0`,
+    so missing/None methods rank lowest. This test exercises
+    BOTH the `.get()` default AND the `or 0` (None coalesce)
+    paths — a refactor that switched to `m["cyclomatic_complexity"]`
+    would KeyError on missing fields; a refactor that dropped
+    the `or 0` would TypeError on None comparisons."""
+    from src.render.obsidian import _pick_primary_method
+
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [
+            # Missing CC field entirely.
+            {
+                "id": "src.X:X.no_cc",
+                "name": "no_cc",
+                "kind": "method",
+            },
+            # Explicit None CC.
+            {
+                "id": "src.X:X.none_cc",
+                "name": "none_cc",
+                "cyclomatic_complexity": None,
+                "kind": "method",
+            },
+            # Real CC=1.
+            {
+                "id": "src.X:X.real",
+                "name": "real",
+                "cyclomatic_complexity": 1,
+                "kind": "method",
+            },
+        ],
+    )
+    # `real` wins (CC=1 > 0); the other two tie at 0 and would
+    # have been tiebroken alphabetically if `real` weren't there.
+    assert (
+        _pick_primary_method("abc012345678", "src.X:X")
+        == "src.X:X.real"
+    )
+
+
+def test_pick_primary_method_requires_dot_separator(monkeypatch):
+    """ID-prefix match requires the trailing `.` — a method
+    of `src.XY:XY` does NOT belong to `src.X:X` even though
+    the ID starts with `src.X`. Pins the off-by-one mistake
+    that startswith() would make without the explicit dot."""
+    from src.render.obsidian import _pick_primary_method
+
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [
+            # Same module prefix, different contract.
+            # `src.XY:XY.foo`.startswith("src.X:X.") is False
+            # (good); the dot guard does its job.
+            {
+                "id": "src.XY:XY.foo",
+                "name": "foo",
+                "cyclomatic_complexity": 10,
+                "kind": "method",
+            },
+        ],
+    )
+    assert _pick_primary_method("abc012345678", "src.X:X") is None

@@ -341,7 +341,17 @@ def complexity_hotspots(
     ToB's diagramming-code skill. Tier 1 tops at CC=6 so the
     default returns `[]`; tests use threshold=4 to surface
     meaningful content.
+
+    Raises:
+        ValueError: if `threshold` is negative. Cyclomatic
+            complexity is non-negative, so a negative threshold
+            would match every method — almost certainly a
+            caller-side bug, not an intent. Mirrors the same
+            validation in `render_complexity_heatmap`
+            (chunk 3.16, /review I12).
     """
+    if threshold < 0:
+        raise ValueError(f"threshold must be >= 0 (got {threshold})")
     return load_graph(graph_id, cache_root=cache_root).complexity_hotspots(
         threshold=threshold
     )

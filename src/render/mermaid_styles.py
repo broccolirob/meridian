@@ -35,8 +35,14 @@ COMPLEXITY_CLASSDEFS: tuple[str, ...] = (
     CLASSDEF_HIGH,
 )
 
-# Focus highlight (chunk 3.1's call-graph root marker, now
-# consolidated here so chunks 3.5+ can reuse).
+# Focus highlight for the call-graph root marker. Consumed by
+# `render_call_graph` (chunk 3.1) — the only renderer in the
+# Phase 3 surface that highlights a "you are here" node.
+# Lives in mermaid_styles.py (not inline in mermaid.py) so a
+# future renderer can adopt the same visual cue by importing
+# the constant rather than duplicating the classDef string.
+# (Chunk 3.16 /review I19 corrected the prior comment, which
+# falsely claimed chunks 3.5+ would reuse it — they didn't.)
 FOCUS_CLASSDEF = "classDef focus stroke:#f66,stroke-width:3px"
 
 

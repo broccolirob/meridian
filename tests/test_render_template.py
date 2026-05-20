@@ -379,3 +379,76 @@ def test_render_and_write_logs_warning_when_graph_unavailable(
     # Note body has NO diagram blocks (fallback worked).
     text = Path(out).read_text()
     assert "```mermaid" not in text
+
+
+# --- narrowed-except regression armor (chunk 3.16, /review I17) -----
+
+
+def test_diagram_block_propagates_coding_bugs(
+    erc20_contract, tmp_path, monkeypatch
+):
+    """Chunk 3.16 I17: the diagram block now catches only
+    KeyError/FileNotFoundError/ValueError (expected graph-lookup
+    failures). TypeError from a coding bug must propagate — pre-
+    3.16 the broad `except Exception` would have swallowed it
+    silently and shipped a diagram-less note, hiding the
+    regression."""
+
+    def _raise_type_error(*args, **kwargs):
+        raise TypeError("simulated coding bug in render_inheritance")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_inheritance",
+        _raise_type_error,
+    )
+    # Stub disambiguation so it doesn't ALSO fail (we want to
+    # isolate the diagram block's behavior).
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [],
+    )
+
+    with pytest.raises(TypeError, match="simulated coding bug"):
+        render_and_write_node_note(
+            tmp_path,
+            "abc123456789",
+            erc20_contract,
+            {},
+            "ov",
+        )
+
+
+def test_disambiguation_block_propagates_coding_bugs(
+    erc20_contract, tmp_path, monkeypatch
+):
+    """Chunk 3.16 I17: same narrowing applied to the
+    disambiguation block. AttributeError from a coding bug in
+    `_disambiguated_path` propagates instead of silently
+    falling back to the bare path."""
+
+    def _raise_attribute_error(*args, **kwargs):
+        raise AttributeError("simulated coding bug in _disambiguated_path")
+
+    # Stub the diagram block dependencies so we isolate the
+    # disambiguation block's behavior.
+    monkeypatch.setattr(
+        "src.render.obsidian.render_inheritance",
+        lambda *a, **k: "",
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._pick_primary_method",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._disambiguated_path",
+        _raise_attribute_error,
+    )
+
+    with pytest.raises(AttributeError, match="simulated coding bug"):
+        render_and_write_node_note(
+            tmp_path,
+            "abc123456789",
+            erc20_contract,
+            {},
+            "ov",
+        )

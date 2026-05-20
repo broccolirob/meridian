@@ -256,3 +256,48 @@ def test_render_and_write_flow_note_continues_past_bad_path(
         and "NotARealNode" in m
         for m in warnings
     ), f"expected per-path failure warning; got {warnings}"
+
+
+def test_sequence_render_propagates_coding_bugs(
+    tier1_graph_id, tmp_path, monkeypatch
+):
+    """Chunk 3.16 I17: the per-path sequence-render block now
+    catches only KeyError/FileNotFoundError/ValueError. Expected
+    per-path failures (bad node ID → KeyError) still produce
+    inline placeholders so partial flow notes ship (the chunk
+    3.16 I8 design); coding bugs (TypeError, AttributeError)
+    propagate up so they surface in dispatch_flows's failure
+    recorder instead of being silently swallowed mid-flow."""
+    import pytest
+
+    from src.render.obsidian import render_and_write_flow_note
+    from src.tools import get_node
+
+    gid, cache_root = tier1_graph_id
+    swap = get_node(
+        gid,
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        cache_root=cache_root,
+    )
+
+    def _raise_type_error(*args, **kwargs):
+        raise TypeError("simulated coding bug in render_sequence")
+
+    monkeypatch.setattr(
+        "src.render.obsidian.render_sequence",
+        _raise_type_error,
+    )
+
+    good_path = [
+        "contracts.UniswapV2Pair:UniswapV2Pair.swap",
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer",
+    ]
+
+    with pytest.raises(TypeError, match="simulated coding bug"):
+        render_and_write_flow_note(
+            tmp_path,
+            gid,
+            swap,
+            paths=[good_path],
+            cache_root=cache_root,
+        )

@@ -93,6 +93,12 @@ def write_obsidian_note(
         tmp_path.write_text(content, encoding="utf-8")
         os.replace(tmp_path, target)
     except Exception:
+        # Intentionally broad (chunk 3.16 I17 cleanup left this
+        # one alone): the catch exists to clean up the tmp file
+        # on ANY failure path, then re-raises. Coding bugs
+        # (TypeError, AttributeError) still surface to the
+        # caller because of the `raise` below — the broad catch
+        # is a cleanup hook, not a swallower.
         try:
             tmp_path.unlink()
         except OSError:
@@ -458,8 +464,16 @@ def render_and_write_node_note(
 
     ctx = dict(graph_ctx) if graph_ctx else {}
 
-    # Diagrams are enrichment — never block note writing if they
-    # fail (bad graph_id, test-synthesized node, etc.).
+    # Diagrams are enrichment — never block note writing on
+    # EXPECTED failures (bad graph_id, test-synthesized node,
+    # malformed Trailmark output). Chunk 3.16 I17 narrowed the
+    # catch from `Exception` to the three concrete graph-lookup
+    # exceptions: KeyError (missing node), FileNotFoundError
+    # (missing graph cache), ValueError (input rejection by a
+    # renderer). Coding bugs (TypeError, AttributeError) NOW
+    # propagate up to the dispatcher's failure recorder so they
+    # surface in the run summary instead of silently producing
+    # diagram-less notes.
     try:
         ctx["inheritance_mermaid"] = render_inheritance(
             graph_id, node["id"], cache_root=cache_root
@@ -471,7 +485,7 @@ def render_and_write_node_note(
             ctx["call_graph_mermaid"] = render_call_graph(
                 graph_id, primary, cache_root=cache_root
             )
-    except Exception as e:
+    except (KeyError, FileNotFoundError, ValueError) as e:
         _log.warning(
             "diagram computation failed for %s: %s — proceeding "
             "without diagrams",
@@ -483,12 +497,15 @@ def render_and_write_node_note(
     # detect bare-name collisions. Same graceful fallback as the
     # diagram block above — if the graph isn't loadable (bad gid,
     # test fixture), use the bare path. Pre-3.10 behavior.
+    # Chunk 3.16 I17: narrowed catch (was `except Exception`) to
+    # the three graph-lookup failure modes for the same reason —
+    # programming bugs propagate so they're noticed.
     try:
         rel_path = (
             f"{_disambiguated_path(node, graph_id, cache_root=cache_root)}"
             f".md"
         )
-    except Exception as e:
+    except (KeyError, FileNotFoundError, ValueError) as e:
         _log.warning(
             "filename disambiguation failed for %s: %s — using "
             "bare path",
@@ -565,7 +582,14 @@ def render_and_write_flow_note(
                 parts.append(
                     render_sequence(graph_id, path, cache_root=cache_root)
                 )
-            except Exception as e:
+            except (KeyError, FileNotFoundError, ValueError) as e:
+                # Chunk 3.16 I17: narrowed from `except Exception`.
+                # KeyError (bad node ID in path), FileNotFoundError
+                # (missing graph cache), ValueError (render_sequence
+                # input validation) are the expected per-path
+                # failures — keep emitting inline placeholders for
+                # those so a partial flow note still ships
+                # (chunk 3.16 I8 design). Coding bugs propagate.
                 _log.warning(
                     "sequence render failed for path %d (%s): %s",
                     i,

@@ -20,6 +20,33 @@ def transfer_method(tier0_graph_id):
     )
 
 
+@pytest.fixture
+def stub_graph_dependencies(monkeypatch):
+    """Stub the graph-touching helpers used by
+    `render_and_write_node_note` so tests can exercise the
+    routing/template logic without relying on the silent
+    `except Exception` fallbacks in the diagram block (chunk
+    3.5) and the disambiguation block (chunk 3.10).
+
+    Pre-3.16 the routing tests passed a fake graph_id and
+    depended on both fallbacks firing silently. If a future
+    cleanup narrows either `except Exception`, the routing
+    tests would all fail without the routing logic itself
+    having regressed. This fixture decouples those tests."""
+    monkeypatch.setattr(
+        "src.render.obsidian.list_nodes",
+        lambda *a, **k: [],  # no collisions → bare path
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian.render_inheritance",
+        lambda *a, **k: "",  # no-op diagram
+    )
+    monkeypatch.setattr(
+        "src.render.obsidian._pick_primary_method",
+        lambda *a, **k: None,  # no primary method → skip call graph
+    )
+
+
 def test_render_is_deterministic(erc20_contract):
     fm1, body1 = render_node_note(erc20_contract, {}, "")
     fm2, body2 = render_node_note(erc20_contract, {}, "")
@@ -127,8 +154,12 @@ def test_render_and_write_returns_string_path(
     ],
 )
 def test_render_and_write_routes_by_kind(
-    kind, name, expected_subdir, tmp_path
+    kind, name, expected_subdir, tmp_path, stub_graph_dependencies
 ):
+    """KIND_TO_FOLDER routing for every Trailmark node kind.
+    Uses `stub_graph_dependencies` so the test exercises the
+    real routing logic without depending on the silent
+    `except Exception` fallbacks (chunk 3.16, /review I6)."""
     fake_node = {
         "id": f"src.fake:{name}",
         "name": name,
@@ -147,9 +178,6 @@ def test_render_and_write_routes_by_kind(
         "branches": [],
         "docstring": None,
     }
-    # gid is fake — diagram computation will fail (no such graph
-    # in any cache), but render_and_write_node_note logs and
-    # proceeds, so the routing assertion still holds.
     out = render_and_write_node_note(
         tmp_path, "abc012345678", fake_node, {}, "ov"
     )
@@ -305,3 +333,49 @@ def test_resolve_wikilink_returns_bare_path_when_no_collision(
     # Unchanged from pre-3.10: no qualification because ERC20 is
     # unique among contract-folder nodes in Tier 0.
     assert link == "[[contracts/ERC20|ERC20]]"
+
+
+# --- silent-fallback regression armor (chunk 3.16, /review I6) ------
+
+
+def test_render_and_write_logs_warning_when_graph_unavailable(
+    erc20_contract, tmp_path, caplog
+):
+    """When the graph cache file doesn't exist (bad gid), the
+    diagram block in `render_and_write_node_note` logs a warning
+    and ships the note without diagrams. The disambiguation block
+    similarly falls back to the bare path.
+
+    The routing tests above use `stub_graph_dependencies` so they
+    DON'T depend on this fallback — but the fallback itself is
+    still real behavior we ship. This test pins it independently
+    so a future refactor that drops the safety net (e.g.,
+    narrowing `except Exception` per /review I17) surfaces here,
+    not via mysterious failures in the routing tests."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="src.render.obsidian")
+    out = render_and_write_node_note(
+        tmp_path,
+        "deadbeef0000",  # valid 12-hex shape, not an actual cache
+        erc20_contract,
+        {},
+        "ov",
+    )
+    # Note still ships
+    assert Path(out).exists()
+    assert out.endswith("/contracts/ERC20.md")
+
+    # Warning fired for the diagram failure (chunk 3.5) AND/OR
+    # the disambiguation failure (chunk 3.10). Either logged
+    # message indicates the fallback engaged.
+    warnings = [r.getMessage() for r in caplog.records]
+    assert any(
+        "diagram computation failed" in m
+        or "disambiguation failed" in m
+        for m in warnings
+    ), f"expected fallback warning; got {warnings}"
+
+    # Note body has NO diagram blocks (fallback worked).
+    text = Path(out).read_text()
+    assert "```mermaid" not in text

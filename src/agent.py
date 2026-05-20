@@ -1,17 +1,23 @@
 """Main agent — the washable orchestrator.
 
-Walks a parsed graph's topological order and dispatches NodeDocumenter
-per node.
+Walks a parsed graph's topological order, dispatches NodeDocumenter
+per node, then enumerates entrypoints and dispatches FlowTracer per
+entrypoint.
 
-Two public entry points:
+Three public entry points:
 
 - `build_agent(graph_id, vault_path)` constructs a deepagents agent
-  configured for single-node dispatch (the LLM receives one node per
-  user message and forwards to NodeDocumenter).
+  wired to BOTH subagents (NodeDocumenter + FlowTracer). The LLM
+  picks which subagent to dispatch based on the task message verb
+  ("Document the node …" → NodeDocumenter; "Trace the entrypoint …"
+  → FlowTracer).
 
-- `dispatch_topo(graph_id, vault_path, ...)` is the Python-driven
-  loop: it builds the agent once, walks `topo_order`, and invokes
-  the agent per node through a ThreadPoolExecutor (default cap = 5).
+- `dispatch_topo(graph_id, vault_path, ...)` is the level-gated
+  loop for documenting nodes in topological order.
+
+- `dispatch_flows(graph_id, vault_path, ...)` enumerates the
+  attack-surface entrypoints and dispatches FlowTracer per
+  entrypoint in a flat parallel pool (no ordering constraint).
 """
 
 import logging
@@ -23,8 +29,8 @@ from deepagents import create_deep_agent
 from langchain_openai import ChatOpenAI
 
 from src.graph.topo import topo_levels, topo_order
-from src.subagents import NODE_DOCUMENTER_SUBAGENT
-from src.tools import graph_summary
+from src.subagents import FLOW_TRACER_SUBAGENT, NODE_DOCUMENTER_SUBAGENT
+from src.tools import attack_surface, callees_of, graph_summary
 
 _log = logging.getLogger(__name__)
 
@@ -64,15 +70,19 @@ becomes real — until then, treat that step as a no-op):
    order — bases come before derived contracts so wikilinks
    resolve. THIS IS THE ORDER YOU MUST DISPATCH NodeDocumenter IN.
 
-6. You'll be invoked once per node by the Python dispatch loop in
-   `dispatch_topo`. Each invocation: receive a node_id in the user
-   message, dispatch the `node-documenter` subagent via the `task`
-   tool (passing graph_id, node_id, vault_path), and return the
-   absolute path the subagent wrote. The Python driver walks the
-   topo list; you do NOT loop. Do not invent extra dispatches.
+6. NodeDocumenter dispatch: When invoked with a "Document the node
+   `<id>`..." task message, dispatch the `node-documenter` subagent
+   via the `task` tool (passing graph_id, node_id, vault_path), and
+   return the absolute path the subagent wrote. The Python driver
+   `dispatch_topo` walks the topo list; you do NOT loop. Do not
+   invent extra dispatches.
 
-7. For each entrypoint returned by `attack_surface(graph_id)`,
-   dispatch the `flow-tracer` subagent. [Phase 3 — skip for now.]
+7. FlowTracer dispatch: When invoked with a "Trace the entrypoint
+   `<id>`..." task message, dispatch the `flow-tracer` subagent via
+   the `task` tool (passing graph_id, entrypoint_node_id,
+   vault_path), and return the absolute path the subagent wrote.
+   The Python driver `dispatch_flows` walks the entrypoint list;
+   you do NOT loop. Do not invent extra dispatches.
 
 8. Dispatch the `risk-synthesizer` subagent ONCE over the
    augmented graph. [Phase 4 — skip for now.]
@@ -103,15 +113,17 @@ def build_agent(
     `Path(vault).resolve()` so the LLM sees an unambiguous string).
 
     Returns a langgraph `CompiledStateGraph` ready for `.invoke()`.
-    The agent is configured for single-node dispatch: each invocation
-    receives one node in the user message and forwards to the
-    node-documenter subagent. The Python driver in `dispatch_topo`
-    handles the walk across the topological order.
+    The agent is wired with BOTH subagents (NodeDocumenter +
+    FlowTracer). Each `.invoke()` carries one task — the LLM picks
+    which subagent to dispatch based on the task message verb
+    ("Document the node …" → NodeDocumenter; "Trace the
+    entrypoint …" → FlowTracer). Python drivers (`dispatch_topo`
+    and `dispatch_flows`) handle the enumeration loop.
     """
     llm = ChatOpenAI(model=model)
     return create_deep_agent(
         model=llm,
-        subagents=[NODE_DOCUMENTER_SUBAGENT],
+        subagents=[NODE_DOCUMENTER_SUBAGENT, FLOW_TRACER_SUBAGENT],
         system_prompt=_build_system_prompt(graph_id, vault_path),
         tools=[
             graph_summary,
@@ -226,6 +238,110 @@ def dispatch_topo(
     return {
         "graph_id": graph_id,
         "node_count": len(order),
+        "successes": successes,
+        "failures": failures,
+        "order": order,
+    }
+
+
+def _invoke_one_flow(
+    agent: Any, graph_id: str, entrypoint_id: str, vault_path: str
+) -> dict[str, Any]:
+    """Single agent invocation for one entrypoint. Exceptions bubble
+    up to dispatch_flows, which records them per-entrypoint."""
+    task_msg = (
+        f"Trace the entrypoint `{entrypoint_id}` in graph "
+        f"`{graph_id}`. vault_path (absolute) = {vault_path}. "
+        f"Dispatch the `flow-tracer` subagent via the `task` tool — "
+        f"do not generate the flow note content yourself."
+    )
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": task_msg}]}
+    )
+    last = result["messages"][-1].content
+    return {"node_id": entrypoint_id, "agent_reply": last}
+
+
+def dispatch_flows(
+    graph_id: str,
+    vault_path: str,
+    *,
+    model: str = DEFAULT_MODEL,
+    concurrency_cap: int = DEFAULT_CONCURRENCY_CAP,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    skip_leaf_entrypoints: bool = True,
+) -> dict[str, Any]:
+    """Enumerate entrypoints via `attack_surface` and dispatch
+    FlowTracer per entrypoint. Returns a summary of what shipped.
+
+    `skip_leaf_entrypoints` (default True): filter out entrypoints
+    with no outgoing callees (leaf functions like simple getters).
+    Tracing them produces an empty-paths placeholder note —
+    wasteful at scale.
+
+    Per-entrypoint exceptions are caught and recorded in `failures`;
+    the loop never aborts mid-walk. Mirrors `dispatch_topo`'s shape
+    so a future orchestrator can compose both passes.
+
+    Cache root: ALWAYS the default `.washable/graph/` (same
+    constraint as `dispatch_topo` — subagent tools bind their
+    cache_root default at module-import time on the LLM tool list).
+
+    Returns:
+        {
+            "graph_id":         str,
+            "entrypoint_count": int,
+            "successes":        [{"node_id", "agent_reply"}, ...],
+            "failures":         [{"node_id", "error"}, ...],
+            "order":            [entrypoint_id, ...],
+        }
+    """
+    if concurrency_cap < 1:
+        raise ValueError(
+            f"concurrency_cap must be >= 1 (got {concurrency_cap})"
+        )
+
+    entrypoints = attack_surface(graph_id)
+    if skip_leaf_entrypoints:
+        entrypoints = [
+            e for e in entrypoints
+            if callees_of(graph_id, e["node_id"])
+        ]
+    order = [e["node_id"] for e in entrypoints]
+
+    agent = build_agent(graph_id, vault_path, model=model)
+    successes: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    def _try_one(eid: str) -> tuple[str, Any]:
+        try:
+            return (
+                "ok",
+                _invoke_one_flow(agent, graph_id, eid, vault_path),
+            )
+        except Exception as e:
+            _log.exception("flow dispatch failed for %s", eid)
+            return ("fail", f"{type(e).__name__}: {e}")
+
+    # Entrypoints are independent — flat parallel pool, no
+    # level-gating (unlike dispatch_topo's inheritance-aware walk).
+    progress_idx = 0
+    with ThreadPoolExecutor(max_workers=concurrency_cap) as pool:
+        futures = {pool.submit(_try_one, eid): eid for eid in order}
+        for future in as_completed(futures):
+            eid = futures[future]
+            status, info = future.result()
+            progress_idx += 1
+            if on_progress is not None:
+                on_progress(progress_idx, len(order), eid)
+            if status == "ok":
+                successes.append(info)
+            else:
+                failures.append({"node_id": eid, "error": info})
+
+    return {
+        "graph_id": graph_id,
+        "entrypoint_count": len(order),
         "successes": successes,
         "failures": failures,
         "order": order,

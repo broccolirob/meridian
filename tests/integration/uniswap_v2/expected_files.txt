@@ -42,3 +42,8 @@ _meta/contracts.interfaces.IUniswapV2Pair.md
 _meta/contracts.libraries.Math.md
 _meta/contracts.libraries.SafeMath.md
 _meta/contracts.libraries.UQ112x112.md
+
+# Flow notes (chunk 3.8 — FlowTracer on Pair's three entrypoints)
+flows/swap.md
+flows/mint.md
+flows/burn.md

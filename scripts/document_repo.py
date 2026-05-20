@@ -22,6 +22,7 @@ load_dotenv(".env")
 from src.agent import (  # noqa: E402
     DEFAULT_CONCURRENCY_CAP,
     DEFAULT_MODEL,
+    dispatch_flows,
     dispatch_topo,
 )
 from src.render.moc import write_root_moc  # noqa: E402
@@ -84,6 +85,31 @@ def main() -> int:
     print(f"OK   : {len(result['successes'])}")
     print(f"FAIL : {len(result['failures'])}")
     for f in result["failures"]:
+        print(f"  FAIL {f['node_id']}: {f['error']}")
+
+    # Phase 3 flow dispatch — enumerate attack-surface entrypoints
+    # and dispatch FlowTracer per entrypoint. Leaf entrypoints
+    # (no outgoing callees) are filtered out by default.
+    print("---")
+    print(
+        f"Tracing flows (cap={args.concurrency}, "
+        f"model={args.model})..."
+    )
+
+    def _flow_progress(i: int, n: int, eid: str) -> None:
+        print(f"  [{i}/{n}] {eid}")
+
+    flow_result = dispatch_flows(
+        graph_id,
+        str(vault),
+        model=args.model,
+        concurrency_cap=args.concurrency,
+        on_progress=_flow_progress,
+    )
+    print(f"FLOWS: {flow_result['entrypoint_count']}")
+    print(f"OK   : {len(flow_result['successes'])}")
+    print(f"FAIL : {len(flow_result['failures'])}")
+    for f in flow_result["failures"]:
         print(f"  FAIL {f['node_id']}: {f['error']}")
 
     # Always try to write MOCs — even partial-success vaults benefit

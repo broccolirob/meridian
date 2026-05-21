@@ -93,6 +93,55 @@ def graph_summary(
     return load_graph(graph_id, cache_root=cache_root).summary()
 
 
+def diff_graphs(
+    before_id: str,
+    after_id: str,
+    *,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> dict[str, Any]:
+    """Return a structured diff between two cached graphs.
+
+    `before_id` is the prior snapshot; `after_id` is the
+    current one. The returned dict (from Trailmark's
+    `compute_diff`) has:
+
+      - `summary_delta`: counts (nodes, edges, entrypoints)
+        with before/after/delta — ONLY keys whose count
+        changed. Empty dict when nothing changed at the
+        aggregate level.
+      - `nodes`: {`added`, `removed`, `modified`}. Added /
+        removed entries are unit summaries (id, name, kind,
+        file, cyclomatic_complexity); modified entries are
+        {id, changes} where changes covers
+        cyclomatic_complexity, parameters, line_span.
+      - `edges`: {`added`, `removed`} of {source, target,
+        kind}.
+      - `entrypoints`: {`added`, `removed`, `modified`}. The
+        attack-surface delta — new public/external functions
+        (added), removed ones (removed), and trust/asset
+        shifts (modified). This is the keystone for
+        graph-evolution surfacing (chunk 5.2's renderer
+        consumes it).
+
+    Read-only — no `_ANNOTATE_LOCK`. Trailmark's lru_cache
+    on `_load_graph_cached` handles concurrent readers.
+
+    NOTE on argument direction: Trailmark's
+    `diff_against(other)` treats `other` as the "before"
+    state and `self` as "after". This wrapper exposes the
+    `(before, after)` order auditors expect and inverts
+    internally — pass `before_id` first.
+
+    Raises:
+        ValueError: either ID fails the 12-hex pattern
+            check (via `load_graph`).
+        FileNotFoundError: either graph is not cached.
+    """
+    before_engine = load_graph(before_id, cache_root=cache_root)
+    after_engine = load_graph(after_id, cache_root=cache_root)
+    return after_engine.diff_against(before_engine)
+
+
 def list_nodes(
     graph_id: str,
     kind: str | None = None,

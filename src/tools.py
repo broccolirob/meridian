@@ -408,6 +408,43 @@ def run_preanalysis(
     return result
 
 
+def list_subgraph_nodes(
+    graph_id: str,
+    name: str,
+    *,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> list[dict[str, Any]]:
+    """Return all nodes in the named subgraph.
+
+    Subgraphs are registered by `run_preanalysis` (e.g.,
+    `tainted`, `high_blast_radius`, `privilege_boundary`,
+    `entrypoints`, `entrypoint_reachable`) and by
+    `augment_sarif` (e.g., `sarif:Slither`, `sarif:warning`).
+    Returns full node dicts (same shape as `get_node` /
+    `list_nodes`); subgraph membership is determined by
+    Trailmark's preanalysis or sarif matcher.
+
+    Returns `[]` if `name` isn't a registered subgraph on
+    the engine — matches the LLM's mental model that "empty
+    means nothing matched" and the convention of sibling tools
+    like `nodes_with_annotation`. Avoids surfacing Trailmark's
+    KeyError as a tool-error string the LLM might
+    misinterpret as a workflow failure.
+
+    Read-only: no _ANNOTATE_LOCK, no save_graph. Safe to call
+    concurrently from multiple subagent workers.
+
+    Raises:
+        ValueError: graph_id fails the 12-hex pattern check
+            (via load_graph's validator).
+    """
+    engine = load_graph(graph_id, cache_root=cache_root)
+    try:
+        return engine.subgraph(name)
+    except KeyError:
+        return []
+
+
 # Cap on the requested line range for read_file_range. Defends
 # against attacker-supplied repos where a node's Trailmark-parsed
 # line range claims something absurd like start_line=1,

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import threading
 import time as _time
 import weakref
@@ -764,6 +765,116 @@ def render_and_write_flow_note(
         parts.append(
             "## Paths\n\n"
             "_No multi-hop paths from this entrypoint in the graph._\n\n"
+        )
+
+    if observations:
+        parts.append("## Observations\n\n")
+        for obs in observations:
+            parts.append(f"- {obs}\n")
+
+    body = "".join(parts)
+    written = write_obsidian_note(
+        vault_path, rel_path, frontmatter, body
+    )
+    return str(written)
+
+
+# Risk-note name allowlist: lowercase-alnum kebab-case.
+# Pattern allows e.g. `hotspots`, `delegatecall-sites`,
+# `reentrancy-candidates` but rejects: path-traversal
+# (`../foo`), hyphen-only or hyphen-bookended (`-`, `--`,
+# `-foo`, `foo-`), and double-internal hyphens (`a--b`) —
+# anything that would produce ambiguous or ugly vault file
+# names. Mirrors _VAULT_PATH_BAD_CHARS defense pattern from
+# src/agent.py.
+_RISK_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def render_and_write_risk_note(
+    vault_path: str | Path,
+    graph_id: str,
+    risk_name: str,
+    overview: str,
+    involved_nodes: list[str],
+    observations: list[str] | None = None,
+    *,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> str:
+    """Render a risk note + write to `vault/risks/<risk_name>.md`
+    in one atomic call.
+
+    `risk_name` is a kebab-case slug (e.g., 'hotspots',
+    'delegatecall-sites', 'reentrancy-candidates'). Must match
+    `[a-z0-9-]+` — rejects path-traversal attempts from
+    attacker-controlled risk_name strings.
+
+    `involved_nodes` is a list of Trailmark node IDs that this
+    risk touches. Each is rendered as a wikilink in the
+    "Involved Nodes" section. Unresolvable hops fall back to a
+    backticked bare name — same except-tuple as flow note hops
+    (KeyError + cache I/O failures + ValueError).
+
+    Body layout:
+        ## Overview          ← overview parameter (LLM prose)
+        ## Involved Nodes
+        - [[contracts/Pair|swap]]
+        - ...
+        ## Observations      ← bullet list (skipped when empty)
+
+    Empty `involved_nodes` produces a placeholder section so
+    the note still ships. Returns the absolute file path as a
+    string (LLM-friendly).
+
+    Raises:
+        ValueError: `risk_name` contains characters outside
+            `[a-z0-9-]` (path-traversal defense).
+    """
+    if not _RISK_NAME_RE.fullmatch(risk_name):
+        raise ValueError(
+            f"risk_name {risk_name!r} must be lowercase "
+            f"kebab-case (e.g. 'hotspots', "
+            f"'delegatecall-sites') — path-traversal defense"
+        )
+    # LLM may pass None for an empty list (deepagents tool
+    # serialization sometimes converts [] → null). Defend
+    # against TypeError on len() in the frontmatter. Same
+    # one-liner pattern as `observations` default.
+    if involved_nodes is None:
+        involved_nodes = []
+
+    rel_path = f"risks/{risk_name}.md"
+    frontmatter: dict[str, Any] = {
+        "type": "risk",
+        "risk_name": risk_name,
+        "nodes_count": len(involved_nodes),
+    }
+
+    parts: list[str] = [_render_overview(overview), "\n"]
+
+    parts.append("## Involved Nodes\n\n")
+    if involved_nodes:
+        for nid in involved_nodes:
+            try:
+                link = resolve_wikilink(
+                    graph_id, nid, cache_root=cache_root
+                )
+                parts.append(f"- {link}\n")
+            except (
+                KeyError,
+                FileNotFoundError,
+                ValueError,
+                OSError,
+                EOFError,
+                pickle.UnpicklingError,
+            ):
+                # Same fallback as flow note hops: backticked
+                # bare name when wikilink resolution fails.
+                bare = nid.rsplit(":", 1)[-1]
+                parts.append(f"- `{bare}` (no contract note)\n")
+        parts.append("\n")
+    else:
+        parts.append(
+            "_No involved nodes recorded for this risk._\n\n"
         )
 
     if observations:

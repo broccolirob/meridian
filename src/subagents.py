@@ -9,14 +9,18 @@ from deepagents import SubAgent
 from src.render.obsidian import (
     render_and_write_flow_note,
     render_and_write_node_note,
+    render_and_write_risk_note,
     resolve_wikilink,
 )
 from src.tools import (
     annotate,
     callees_of,
     callers_of,
+    complexity_hotspots,
     get_node,
     list_nodes,
+    list_subgraph_nodes,
+    nodes_with_annotation,
     paths_between,
     reachable_from,
     read_node_source,
@@ -280,5 +284,148 @@ FLOW_TRACER_SUBAGENT: SubAgent = {
         resolve_wikilink,
         # Combined render+write (the ONLY way to persist a flow note)
         render_and_write_flow_note,
+    ],
+}
+
+
+_RISK_SYNTHESIZER_PROMPT = """\
+You are RiskSynthesizer. You produce THREE risk notes under
+vault/risks/ that prioritize what an auditor should review first:
+
+1. hotspots.md           — high-complexity methods, ranked
+2. delegatecall-sites.md — delegatecall usage findings
+3. reentrancy-candidates.md — reentrancy findings + tainted nodes
+
+CRITICAL RULES — read twice.
+
+1. The ONLY way to persist a note is to call
+   `render_and_write_risk_note(graph_id, risk_name, overview,
+   involved_nodes, observations)`. You do NOT have
+   `write_obsidian_note` or any separable render_X tools.
+   Call the tool ONCE per risk note (3 times total per
+   invocation).
+
+   Note: the vault root is supplied by the orchestrator at
+   build time — you do NOT pass `vault_path` as a tool
+   argument.
+
+2. `risk_name` MUST be exactly one of: 'hotspots',
+   'delegatecall-sites', 'reentrancy-candidates'. The tool
+   rejects any other name (path-traversal defense).
+
+3. `overview` is 3-5 sentences of auditor-facing prose
+   explaining what this risk category looks like in THIS
+   codebase. Not a tool definition; not boilerplate. Cite
+   specific contracts/methods.
+
+4. `involved_nodes` is a list of 5-15 Trailmark node IDs.
+   Pick the most auditor-relevant ones; don't dump everything.
+   Prioritize:
+     - Hotspots: top 5-10 by CC; prefer those also in `tainted`
+     - Delegatecall: every finding with "delegatecall" in
+       rule or description
+     - Reentrancy: every reentrancy-tagged finding; prioritize
+       intersection with `tainted` if both have data
+
+5. `observations` is a list of short auditor-note strings —
+   surprising patterns, trust-boundary crossings, cross-
+   contract issues. Skip (pass None) if nothing's notable.
+
+6. Side effect: for each node in `involved_nodes`, also call
+   `annotate(graph_id, node_id, kind="finding",
+   description=...)` so node notes can embed the risk
+   reference on next render (chunk 4.7). Description should
+   be one line: `"[<risk_name>] <one-sentence reason>"`.
+
+Inputs you receive in the task message:
+- graph_id: 12-char hex identifying the parsed repo
+- (preanalysis + augment_sarif have ALREADY been run by the
+  orchestrator before you start)
+
+Workflow:
+
+1. Query findings:
+     `findings = nodes_with_annotation(graph_id, "finding")`
+   Returns full node dicts of every node with attached SARIF
+   findings.
+
+2. Query hotspots:
+     `hotspots = complexity_hotspots(graph_id, threshold=5)`
+   Returns nodes with CC >= 5, ranked.
+
+3. Query preanalysis subgraphs:
+   - `tainted = list_subgraph_nodes(graph_id, "tainted")`
+   - `entrypoints = list_subgraph_nodes(graph_id, "entrypoints")`
+   - `high_blast_radius = list_subgraph_nodes(graph_id,
+     "high_blast_radius")`  (may be empty on simple codebases
+     — that's normal)
+   Each returns full node dicts; intersect by `node["id"]`.
+
+4. For each finding, inspect annotation description (via
+   `get_node(graph_id, finding_id)["annotations"]`) to
+   identify delegatecall / reentrancy rules. Slither rule IDs
+   include patterns like `1-1-reentrancy-no-eth`,
+   `1-1-controlled-delegatecall`. Match on substring.
+
+5. Synthesize the three notes:
+   - hotspots: top 5-10 hotspots, cross-ref with `tainted`
+   - delegatecall-sites: every delegatecall-tagged finding
+   - reentrancy-candidates: every reentrancy-tagged finding;
+     prioritize those also in `tainted`
+
+6. For each note: call render_and_write_risk_note ONCE +
+   call annotate ONCE PER involved node (5-15 annotates
+   per note).
+
+7. Return the THREE absolute file paths as a JSON list:
+     ["/path/to/hotspots.md",
+      "/path/to/delegatecall-sites.md",
+      "/path/to/reentrancy-candidates.md"]
+   Empty list if NO findings or hotspots existed (don't
+   write empty notes).
+
+Style rules for the overview:
+- Active voice, concrete nouns, line citations.
+- Forbidden words: delve, crucial, robust, comprehensive,
+  nuanced, multifaceted, furthermore, moreover, additionally,
+  landscape, tapestry, foster, showcase, intricate, vibrant,
+  fundamental, significant, interplay.
+- Do not include "this note", "this document", or
+  meta-commentary. The auditor knows they're reading a
+  risk-prioritization note.
+"""
+
+RISK_SYNTHESIZER_SUBAGENT: SubAgent = {
+    "name": "risk-synthesizer",
+    "description": (
+        "Synthesizes 3 risk notes (hotspots, "
+        "delegatecall-sites, reentrancy-candidates) under "
+        "vault/risks/ from preanalysis subgraphs + SARIF "
+        "findings + complexity hotspots. Adds back-"
+        "annotations on involved nodes so node notes can "
+        "embed risk references on next render. Input in the "
+        "task message: graph_id (preanalysis + augment_sarif "
+        "must have run BEFORE this subagent). Orchestrator "
+        "MUST serialize this subagent AFTER the NodeDocumenter "
+        "wave drains: RiskSynthesizer issues 15-45 annotate "
+        "calls per invocation; concurrent annotate workers "
+        "would serialize on _ANNOTATE_LOCK and stall the "
+        "dispatch loop. The vault root is bound by the "
+        "orchestrator — never pass vault_path as a tool "
+        "argument."
+    ),
+    "system_prompt": _RISK_SYNTHESIZER_PROMPT,
+    "tools": [
+        # Read-only data queries
+        nodes_with_annotation,
+        complexity_hotspots,
+        list_subgraph_nodes,
+        get_node,
+        # Wikilink resolution (for involved-nodes rendering)
+        resolve_wikilink,
+        # Side effect (back-annotate involved nodes)
+        annotate,
+        # Combined render+write (the ONLY way to persist)
+        render_and_write_risk_note,
     ],
 }

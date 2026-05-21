@@ -112,10 +112,12 @@ Workflow:
        "uses":       ["[[libraries/SafeTransferLib|SafeTransferLib]]"],
        "functions":  [method dicts as in step 5],
        "annotations": [],
-       "risks":      [],
      }
    Omit keys you have no data for; the renderer handles missing
-   keys with placeholders.
+   keys with placeholders. Risk findings render automatically
+   from the node's `kind="finding"` annotations (place them via
+   `annotate(...)`, NOT a graph_ctx key — `render_and_write_node_note`
+   pulls them from the graph).
 
 7. Write the overview body (a SHORT prose paragraph, NOT the whole
    note). 3-5 sentences for a contract or library, leading with

@@ -1,0 +1,17 @@
+# Local semgrep rule used by tests/test_semgrep.py.
+#
+# Hermetic alternative to `p/python` — no registry network
+# fetch, deterministic matches. The two patterns below trigger
+# on `bad.py` regardless of semgrep version or registry drift.
+rules:
+  - id: smol-dangerous-exec
+    pattern: exec(...)
+    message: exec() can execute arbitrary code
+    languages: [python]
+    severity: WARNING
+
+  - id: smol-hardcoded-secret
+    pattern-regex: '"sk-[a-zA-Z0-9]{32}"'
+    message: Hardcoded API key
+    languages: [python]
+    severity: WARNING

@@ -1,0 +1,13 @@
+# Local semgrep rule pack used by tests/test_semgrep.py.
+# Half of the split fixture for `test_run_semgrep_supports_
+# multiple_rule_configs` — paired with rules-secret.yaml.
+# Splitting lets the test pass BOTH configs and assert both
+# distinct rule IDs appear in the SARIF; passing one
+# combined file twice wouldn't catch a silent --config
+# override bug.
+rules:
+  - id: smol-dangerous-exec
+    pattern: exec(...)
+    message: exec() can execute arbitrary code
+    languages: [python]
+    severity: WARNING

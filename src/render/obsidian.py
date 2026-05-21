@@ -19,7 +19,7 @@ from src.render.mermaid import (
     render_inheritance,
     render_sequence,
 )
-from src.tools import get_node, list_nodes
+from src.tools import annotations_of, get_node, list_nodes
 
 _log = logging.getLogger(__name__)
 
@@ -441,11 +441,115 @@ def _render_annotations(graph_ctx: dict[str, Any]) -> str:
     return "".join(out)
 
 
+# Mirrors the kebab-case allowlist in `_RISK_NAME_RE` (the
+# pattern `render_and_write_risk_note` enforces on risk_name).
+# Anchored to fail closed: malformed brackets fall through to
+# plain-text rendering rather than producing broken wikilinks
+# from LLM-hallucinated prefixes like `[Hotspots]`,
+# `[has space]`, or `[trailing-]`.
+#
+# Intentionally NOT re.DOTALL: RiskSynthesizer's prompt
+# (`src/subagents.py:_RISK_SYNTHESIZER_PROMPT`) contracts a
+# one-line reason. DOTALL would let `(.+)` swallow newlines
+# from a malicious description like
+# `"[hotspots] benign\n- [[../../evil|x]] — injected"`,
+# turning one annotation into two rendered bullets — a
+# prompt-injection vector since descriptions ultimately come
+# from LLM output over attacker-controlled Solidity comments
+# and slither projections.
+_RISK_PREFIX_RE = re.compile(r"^\[([a-z0-9]+(?:-[a-z0-9]+)*)\]\s+(.+)$")
+
+
+def _flatten_to_one_line(s: str) -> str:
+    """Defang attacker-controlled finding description text.
+
+    Two transformations:
+
+    1. Collapse all whitespace runs (newlines, tabs, repeated
+       spaces) to a single space and strip. Prevents
+       structural injection: an attacker who controls a
+       Solidity comment can steer the LLM to emit
+       descriptions containing `\\n- [[../evil]]` (extra
+       bullet) or `\\n## Fake heading` (header injection).
+       Flattening forces every description into one bullet's
+       worth of inline text — markdown can no longer
+       interpret it as structure.
+
+    2. Defang inline link syntax so attacker-chosen
+       targets don't render as clickable links. `[[`→`[ [`
+       breaks Obsidian wikilinks (vault-traversal attacks
+       like `[[../../etc/passwd]]`); `](`→`] (` breaks
+       markdown link syntax `[trusted text](http://evil)`.
+       The visible text survives (auditor sees what was
+       attempted) but the link is inert."""
+    flat = " ".join(s.split())
+    return flat.replace("[[", "[ [").replace("](", "] (")
+
+
 def _render_risks(graph_ctx: dict[str, Any]) -> str:
-    risks = graph_ctx.get("risks") or []
-    if not risks:
+    """Render the Risks section from finding annotations.
+
+    `graph_ctx["finding_annotations"]` is the list returned by
+    `annotations_of(graph_id, node_id, kind="finding")`,
+    populated by `render_and_write_node_note`. Each entry is a
+    dict with `kind`, `description`, `source`.
+
+    Two shapes render differently:
+    - RiskSynthesizer descriptions match `[<risk_name>]
+      <reason>` and render as wikilinks to
+      `vault/risks/<risk_name>.md`.
+    - SARIF descriptions (no prefix) render as plain bullets.
+
+    RiskSynthesizer items render first so the auditor reads
+    the LLM's curated prioritization before raw analyzer
+    output.
+
+    Two safety properties this function enforces (not the
+    caller's job):
+
+    1. Markdown-injection defense: every rendered description
+       is flattened to a single line via `_flatten_to_one_line`
+       before interpolation. Auditor-supplied solidity
+       comments can poison LLM finding descriptions; a literal
+       `\\n` in the description would otherwise inject extra
+       bullets or fake headings into the auditor's note.
+
+    2. Idempotency: duplicate annotations (same flattened
+       description) collapse to one bullet via
+       `dict.fromkeys` ordered dedup. Re-running
+       RiskSynthesizer attaches duplicate annotations to the
+       graph (Trailmark's annotate is append-only) — without
+       dedup, a re-render doubles every bullet. The dedup
+       preserves first-seen order so the curated/raw split
+       stays stable.
+    """
+    findings = graph_ctx.get("finding_annotations") or []
+    curated: list[str] = []
+    raw: list[str] = []
+    for f in findings:
+        desc = _flatten_to_one_line(f.get("description") or "")
+        if not desc:
+            continue
+        m = _RISK_PREFIX_RE.match(desc)
+        if m:
+            risk_name = m.group(1)
+            reason = _flatten_to_one_line(m.group(2))
+            curated.append(
+                f"- [[risks/{risk_name}|{risk_name}]] — {reason}"
+            )
+        else:
+            raw.append(f"- {desc}")
+
+    # Order-preserving dedup. dict.fromkeys keeps the
+    # first-occurrence order across Python 3.7+, so a
+    # repeated annotation collapses to its first bullet.
+    curated = list(dict.fromkeys(curated))
+    raw = list(dict.fromkeys(raw))
+
+    if not curated and not raw:
         return "## Risks\n\n_No risks recorded._\n"
-    return "## Risks\n\n" + "".join(f"- {item}\n" for item in risks)
+
+    return "## Risks\n\n" + "\n".join(curated + raw) + "\n"
 
 
 def _build_frontmatter(
@@ -639,6 +743,37 @@ def render_and_write_node_note(
         )
         folder = KIND_TO_FOLDER.get(kind, "contracts")
         rel_path = f"{folder}/{node['name']}.md"
+
+    # Pull finding annotations from the graph so the Risks
+    # section can render them. Same graceful-degradation
+    # pattern as the diagram block above — if the cache is
+    # missing or unreadable (test fixture, transient I/O),
+    # proceed with an empty list rather than aborting the
+    # note. Coding bugs (TypeError, AttributeError) propagate
+    # so they surface in the dispatcher's failure summary.
+    try:
+        ctx["finding_annotations"] = annotations_of(
+            graph_id,
+            node["id"],
+            kind="finding",
+            cache_root=cache_root,
+        )
+    except (
+        KeyError,
+        FileNotFoundError,
+        ValueError,
+        OSError,
+        EOFError,
+        pickle.UnpicklingError,
+    ) as e:
+        _log.warning(
+            "finding annotation lookup failed for %s: %s — "
+            "rendering note without Risks content",
+            node["id"],
+            e,
+        )
+        ctx["finding_annotations"] = []
+
     frontmatter, body_text = render_node_note(node, ctx, body)
     written = write_obsidian_note(
         vault_path, rel_path, frontmatter, body_text

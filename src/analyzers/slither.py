@@ -130,8 +130,28 @@ def run_slither(
     # guarantees the returned path always reflects THIS run.
     out.unlink(missing_ok=True)
 
+    # Pass the target as a path RELATIVE to `cwd`. Slither
+    # happens to emit relative SARIF URIs even when given an
+    # absolute target in current versions — but that's an
+    # internal slither behavior, not a documented contract.
+    # The Phase-4 semgrep wrapper enforces relativization
+    # explicitly because semgrep DOES emit absolute URIs when
+    # given an absolute target, and Trailmark's file+line
+    # matcher silently fails on macOS where `/var` symlinks
+    # to `/private/var`. Mirroring that defense here keeps
+    # both analyzers behaving consistently and protects
+    # against a future slither release switching to
+    # absolute artifactLocation URIs (which would be more
+    # SARIF-compliant but break the chain).
+    try:
+        target_arg = str(repo.relative_to(cwd))
+    except ValueError:
+        # Containment check above should prevent this — but
+        # belt-and-suspenders for any future refactor.
+        target_arg = str(repo)
+
     proc = subprocess.run(
-        [slither, str(repo), "--sarif", str(out)],
+        [slither, target_arg, "--sarif", str(out)],
         capture_output=True,
         text=True,
         timeout=timeout,

@@ -114,10 +114,12 @@ Workflow:
        "annotations": [],
      }
    Omit keys you have no data for; the renderer handles missing
-   keys with placeholders. Risk findings render automatically
-   from the node's `kind="finding"` annotations (place them via
-   `annotate(...)`, NOT a graph_ctx key — `render_and_write_node_note`
-   pulls them from the graph).
+   keys with placeholders. The `"annotations"` list is for
+   non-finding kinds only (assumption / invariant / audit_note).
+   Do NOT pass `kind="finding"` entries here — those are pulled
+   from the graph by `render_and_write_node_note` and rendered
+   in the separate Risks section. Place findings via
+   `annotate(...)` only.
 
 7. Write the overview body (a SHORT prose paragraph, NOT the whole
    note). 3-5 sentences for a contract or library, leading with
@@ -335,9 +337,16 @@ CRITICAL RULES — read twice.
 
 6. Side effect: for each node in `involved_nodes`, also call
    `annotate(graph_id, node_id, kind="finding",
-   description=...)` so node notes can embed the risk
-   reference on next render (chunk 4.7). Description should
-   be one line: `"[<risk_name>] <one-sentence reason>"`.
+   description="[<risk_name>] <one-sentence reason>",
+   source="risk-synthesizer")` so node notes can embed the
+   risk reference on next render (chunk 4.7).
+
+   The `source="risk-synthesizer"` argument is REQUIRED.
+   Without it, your annotations land with `source="manual"`
+   and the node-note renderer cannot distinguish them from
+   raw SARIF findings — they'd render as plain bullets
+   instead of linked wikilinks to the risk note you just
+   wrote.
 
 Inputs you receive in the task message:
 - graph_id: 12-char hex identifying the parsed repo

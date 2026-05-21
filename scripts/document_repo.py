@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -180,7 +181,54 @@ def main() -> int:
         )
         risks_ok = risk_result["ok"]
         if risks_ok:
-            print("      OK")
+            # Parse the LLM's claimed-paths reply and verify
+            # each path exists on disk. Failure mode this
+            # catches: LLM returns ok-looking output that
+            # claims it wrote risk notes but never actually
+            # called render_and_write_risk_note (or wrote to
+            # a wrong location). Without this check, downstream
+            # consumers would silently see an empty risks/
+            # folder. Treat ANY mismatch as rc=2 advisory
+            # degradation — same class as "Phase 4 degraded".
+            reply = risk_result.get("reply", "")
+            try:
+                paths = json.loads(reply) if reply else []
+                if not isinstance(paths, list):
+                    raise ValueError(
+                        f"expected JSON list, got {type(paths).__name__}"
+                    )
+                missing = [
+                    p for p in paths
+                    if not isinstance(p, str) or not Path(p).exists()
+                ]
+                if missing:
+                    print(
+                        f"      WARNING: LLM claimed "
+                        f"{len(paths)} risk note(s) but "
+                        f"{len(missing)} are missing on disk: "
+                        f"{missing}",
+                        file=sys.stderr,
+                    )
+                    risks_ok = False
+                else:
+                    print(
+                        f"      OK ({len(paths)} risk note(s) written)"
+                    )
+            except (ValueError, TypeError) as e:
+                # Non-JSON reply, malformed JSON, or wrong
+                # shape. LLM didn't honor the prompt's
+                # "return the JSON list" contract. Still
+                # advisory — the actual risk notes may have
+                # shipped; downstream code just can't audit
+                # the claim.
+                print(
+                    f"      WARNING: risk-synthesizer reply "
+                    f"not parseable as JSON list: {e}. Vault "
+                    f"may still have risk notes; check "
+                    f"<vault>/risks/ manually.",
+                    file=sys.stderr,
+                )
+                risks_ok = False
         else:
             print(
                 f"      WARNING: risk synthesis failed: "

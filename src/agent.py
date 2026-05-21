@@ -43,7 +43,12 @@ from src.subagents import (
     NODE_DOCUMENTER_SUBAGENT,
     RISK_SYNTHESIZER_SUBAGENT,
 )
-from src.tools import attack_surface, callees_of, graph_summary
+from src.tools import (
+    attack_surface,
+    callees_of,
+    clear_annotations_by_source,
+    graph_summary,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1041,6 +1046,22 @@ def dispatch_risk_synthesis(
                 "on preanalysis subgraphs."
             ),
         }
+
+    # Idempotency guard: clear prior risk-synthesizer
+    # annotations BEFORE invoking the agent. Trailmark's
+    # annotate API is append-only; without this, a re-run
+    # multiplies the on-disk annotations 1×→2×→3× per run
+    # (the render-side `dict.fromkeys` dedup hides this from
+    # node-note output but the engine.pkl grows monotonically
+    # and any tool counting `len(annotations_of(...))` gets
+    # wrong numbers). Mirrors `clear_augmented("sarif")`
+    # Trailmark uses internally for augment_sarif.
+    # `_RISK_SYNTHESIZER_SOURCE` value is the contract
+    # documented in src/subagents.py:_RISK_SYNTHESIZER_PROMPT
+    # step 6.
+    clear_annotations_by_source(
+        graph_id, "risk-synthesizer", kind="finding",
+    )
 
     agent = build_agent(
         graph_id,

@@ -51,12 +51,32 @@ class _FakeAgent:
         return {"messages": [reply]}
 
 
+class _FakeGraph:
+    """Stand-in for Trailmark's internal graph store. Matches
+    the `engine._store._graph.annotations` access path used by
+    `clear_annotations_by_source`. Empty dict means the
+    helper removes nothing and skips save_graph."""
+
+    def __init__(self):
+        self.annotations: dict = {}
+
+
+class _FakeStore:
+    """Stand-in for engine._store. Wraps a _FakeGraph."""
+
+    def __init__(self):
+        self._graph = _FakeGraph()
+
+
 class _FakeEngine:
-    """Stand-in for Trailmark QueryEngine with a configurable
-    subgraph_names() return value."""
+    """Stand-in for Trailmark QueryEngine. Carries a
+    configurable subgraph_names() (for the precondition
+    check) and a _store._graph.annotations dict (for the
+    clear_annotations_by_source path)."""
 
     def __init__(self, subgraphs: set[str]):
         self._subgraphs = subgraphs
+        self._store = _FakeStore()
 
     def subgraph_names(self):
         return list(self._subgraphs)
@@ -75,13 +95,20 @@ def _patch_load_graph_with_preanalysis(monkeypatch):
     """Mock load_graph so the precondition check sees a
     graph with the "tainted" subgraph registered (proving
     run_preanalysis has run). Default for tests that aren't
-    exercising the precondition path."""
-    monkeypatch.setattr(
-        "src.agent.load_graph",
-        lambda *a, **k: _FakeEngine({
+    exercising the precondition path.
+
+    Patches BOTH `src.agent.load_graph` (used by the
+    precondition check) and `src.tools.load_graph` (used by
+    `clear_annotations_by_source`, called next in the
+    dispatcher for re-run idempotency). They're separate
+    module-level bindings; patching only one bypasses the
+    cache for half the dispatcher."""
+    def _fake_engine(*a, **k):
+        return _FakeEngine({
             "tainted", "entrypoints", "high_blast_radius",
-        }),
-    )
+        })
+    monkeypatch.setattr("src.agent.load_graph", _fake_engine)
+    monkeypatch.setattr("src.tools.load_graph", _fake_engine)
 
 
 _VALID_GID = "deadbeef0123"

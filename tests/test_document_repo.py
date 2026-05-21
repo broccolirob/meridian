@@ -420,6 +420,92 @@ def test_phase4_rc2_when_risk_synthesis_fails(
     assert script_module.main() == 2
 
 
+def test_phase4_rc2_when_risk_synth_claims_missing_files(
+    script_module, monkeypatch, tmp_path,
+):
+    """Cross-cutting review fix (I8): dispatch_risk_synthesis
+    returns ok=True with a JSON list of claimed paths. If any
+    claimed path doesn't exist on disk, the script must
+    treat this as rc=2 advisory degradation rather than
+    silently shipping an incomplete vault. Failure mode: LLM
+    returns ok-looking output without actually calling
+    render_and_write_risk_note."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_topo_flows_moc(script_module, monkeypatch)
+
+    monkeypatch.setattr(
+        script_module, "run_slither", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        script_module, "augment_sarif", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "run_preanalysis", lambda *a, **k: {}
+    )
+    # LLM claims it wrote /tmp/nonexistent.md — file doesn't exist.
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis",
+        lambda *a, **k: {
+            "graph_id": "abc", "ok": True,
+            "reply": '["/tmp/definitely-does-not-exist-' \
+                     'washable-test.md"]',
+            "error": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    assert script_module.main() == 2, (
+        "LLM claiming nonexistent paths must yield rc=2 "
+        "(advisory), not silently pass as rc=0"
+    )
+
+
+def test_phase4_rc2_when_risk_synth_reply_unparseable(
+    script_module, monkeypatch, tmp_path,
+):
+    """Cross-cutting review fix (I8): malformed reply (not
+    JSON, wrong shape) also degrades to rc=2. The vault may
+    still have risk notes — but the auditing layer can't
+    confirm what the LLM claims to have done."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_topo_flows_moc(script_module, monkeypatch)
+    monkeypatch.setattr(
+        script_module, "run_slither", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        script_module, "augment_sarif", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "run_preanalysis", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis",
+        lambda *a, **k: {
+            "graph_id": "abc", "ok": True,
+            "reply": "I wrote some risk notes (no JSON)",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    assert script_module.main() == 2
+
+
 def test_phase4_rc1_overrides_rc2_when_topo_fails(
     script_module, monkeypatch, tmp_path,
 ):

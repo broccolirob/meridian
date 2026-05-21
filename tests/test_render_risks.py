@@ -11,33 +11,71 @@ Two parts:
    wikilink.
 """
 
+import shutil
+import subprocess as sp
 from pathlib import Path
 
 import pytest
 
+from src.analyzers.slither import run_slither
 from src.render.obsidian import (
     _render_risks,
     render_and_write_node_note,
 )
-from src.tools import annotate, get_node, trailmark_parse
+from src.tools import (
+    annotate,
+    augment_sarif,
+    get_node,
+    nodes_with_annotation,
+    trailmark_parse,
+)
 
 
 # ----------------------------------------------------------------
 # Unit tests — _render_risks parsing/formatting
 # ----------------------------------------------------------------
 
-def _finding(description: str, source: str = "test") -> dict:
-    """Build a finding-annotation dict in the shape
-    `annotations_of(kind="finding")` returns."""
+_RISK_SYNTHESIZER_SOURCE = "risk-synthesizer"
+
+
+def _curated(description: str) -> dict:
+    """Build a curated finding-annotation dict (source set to
+    `risk-synthesizer`, the value RiskSynthesizer's prompt
+    requires). Used by tests that exercise the wikilink path
+    of `_render_risks`."""
+    return {
+        "kind": "finding",
+        "source": _RISK_SYNTHESIZER_SOURCE,
+        "description": description,
+    }
+
+
+def _raw(description: str, source: str = "sarif:Slither") -> dict:
+    """Build a raw SARIF finding-annotation dict. Matches the
+    shape Trailmark's `augment_sarif` produces. Used by tests
+    that exercise the plain-bullet path of `_render_risks`."""
+    return {
+        "kind": "finding",
+        "source": source,
+        "description": description,
+    }
+
+
+def _finding(description: str, source: str = "risk-synthesizer") -> dict:
+    """Legacy helper kept for tests that don't care about the
+    curated/raw split (empty-state, ordering, etc.). New
+    tests should use `_curated` or `_raw` to make the source
+    contract explicit."""
     return {"kind": "finding", "source": source, "description": description}
 
 
 def test_risks_section_renders_curated_wikilink():
-    """A `[<risk_name>] reason`-shaped description renders as a
+    """A `risk-synthesizer`-sourced annotation with a
+    `[<risk_name>] reason`-shaped description renders as a
     wikilink to vault/risks/<risk_name>.md plus the reason."""
     ctx = {
         "finding_annotations": [
-            _finding("[hotspots] swap holds state across external call"),
+            _curated("[hotspots] swap holds state across external call"),
         ],
     }
     out = _render_risks(ctx)
@@ -52,12 +90,13 @@ def test_risks_section_renders_curated_wikilink():
 
 
 def test_risks_section_renders_sarif_finding_as_plain_text():
-    """An annotation whose description lacks the bracketed
-    kebab-case prefix (raw SARIF output from slither) renders
-    as a plain bullet with NO wikilink."""
+    """Raw SARIF findings (any source other than
+    `risk-synthesizer`) render as plain bullets with NO
+    wikilink, even when the description happens to contain
+    bracketed text."""
     ctx = {
         "finding_annotations": [
-            _finding("controlled-delegatecall: function delegates to user input"),
+            _raw("controlled-delegatecall: function delegates to user input"),
         ],
     }
     out = _render_risks(ctx)
@@ -70,16 +109,47 @@ def test_risks_section_renders_sarif_finding_as_plain_text():
     assert "[[risks/" not in out
 
 
+def test_risks_section_does_not_collide_with_real_sarif_description_shape():
+    """Cross-cutting review fix (C1): Trailmark's SARIF
+    description format is `[WARNING] rule-id: msg (Tool)`.
+    Uppercase makes the regex fail TODAY — but a future
+    Trailmark release that drops the .upper() (or a custom
+    SARIF tool that emits lowercase level) would silently
+    flip every SARIF finding into a broken wikilink to
+    `risks/warning.md`. Source-based filtering eliminates
+    this fragility. Pin the no-collision contract."""
+    ctx = {
+        "finding_annotations": [
+            # Real Trailmark SARIF shape with UPPERCASE level.
+            _raw("[WARNING] 0-1-weak-prng: weak PRNG used (Slither)"),
+            # Hypothetical future-Trailmark shape with lowercase.
+            _raw("[warning] 0-1-weak-prng: weak PRNG used (Slither)"),
+            # Description that EXACTLY matches the curated
+            # prefix shape — but sourced from sarif.
+            _raw("[hotspots] not actually curated; sourced as SARIF"),
+        ],
+    }
+    out = _render_risks(ctx)
+    # NONE of these should produce a wikilink. All three
+    # render as plain bullets because source != "risk-synthesizer".
+    assert "[[risks/warning" not in out
+    assert "[[risks/hotspots" not in out
+    # All three descriptions still appear as plain text bullets.
+    assert "- [WARNING] 0-1-weak-prng" in out or "- [ [WARNING]" in out
+    assert "- [warning] 0-1-weak-prng" in out or "- [ [warning]" in out
+    assert "not actually curated" in out
+
+
 def test_risks_section_orders_curated_before_raw():
     """RiskSynthesizer items must render before SARIF items
     regardless of input order — the auditor reads the LLM's
     prioritization first."""
     ctx = {
         "finding_annotations": [
-            _finding("raw-slither-rule: low-level call without check"),
-            _finding("[reentrancy-candidates] callback reentry surface"),
-            _finding("another-raw: arbitrary send"),
-            _finding("[hotspots] high CC + tainted"),
+            _raw("raw-slither-rule: low-level call without check"),
+            _curated("[reentrancy-candidates] callback reentry surface"),
+            _raw("another-raw: arbitrary send"),
+            _curated("[hotspots] high CC + tainted"),
         ],
     }
     out = _render_risks(ctx)
@@ -299,6 +369,43 @@ def fresh_tier0(tier0_dir, tmp_path):
     return gid, cache_root
 
 
+def test_render_annotations_filters_out_finding_kind():
+    """Cross-cutting review fix (I1): the Annotations section
+    must NOT render `kind="finding"` entries. Those are owned
+    by the Risks section, populated automatically by
+    `render_and_write_node_note` from the graph. If an LLM
+    accidentally passes finding-kind entries in
+    `graph_ctx["annotations"]`, filter them out at render
+    time rather than producing double bullets across the two
+    sections."""
+    from src.render.obsidian import _render_annotations
+
+    ctx = {
+        "annotations": [
+            {"kind": "assumption", "source": "node-documenter",
+             "description": "transfer assumes prior approval"},
+            {"kind": "finding", "source": "risk-synthesizer",
+             "description": "[hotspots] would-double-render"},
+            {"kind": "invariant", "source": "node-documenter",
+             "description": "totalSupply >= sum(balances)"},
+            {"kind": "finding", "source": "sarif:Slither",
+             "description": "raw sarif finding that snuck in"},
+        ],
+    }
+    out = _render_annotations(ctx)
+    # Non-finding kinds appear.
+    assert "**assumption**" in out
+    assert "transfer assumes prior approval" in out
+    assert "**invariant**" in out
+    assert "totalSupply >= sum(balances)" in out
+    # Finding-kind entries are SILENTLY DROPPED here (rendered
+    # by _render_risks instead). They must not appear under
+    # the Annotations section.
+    assert "**finding**" not in out
+    assert "would-double-render" not in out
+    assert "raw sarif finding" not in out
+
+
 def test_render_and_write_node_note_fetches_finding_annotations(
     fresh_tier0, tmp_path,
 ):
@@ -345,3 +452,112 @@ def test_render_and_write_node_note_fetches_finding_annotations(
     )
     # No "No risks recorded" placeholder.
     assert "_No risks recorded._" not in body
+
+
+# ----------------------------------------------------------------
+# Tier 1 binary-gated integration test (cross-cutting review I4)
+# ----------------------------------------------------------------
+
+TIER1_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "tier1_uniswap_v2"
+)
+
+
+def _solc_516_available() -> bool:
+    """Mirrors test_augment_sarif.py + test_slither.py. Tier 1
+    (UniswapV2) compiles with solc 0.5.16."""
+    if shutil.which("solc-select") is None:
+        return False
+    try:
+        proc = sp.run(
+            ["solc-select", "versions"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        return "0.5.16" in proc.stdout
+    except (sp.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+@pytest.mark.skipif(
+    shutil.which("slither") is None,
+    reason="slither not on PATH",
+)
+@pytest.mark.skipif(
+    not _solc_516_available(),
+    reason="solc 0.5.16 not installed",
+)
+def test_tier1_real_slither_finding_renders_as_plain_bullet(
+    tmp_path, monkeypatch,
+):
+    """Cross-cutting review fix (I4): pins the CHUNKS.md 4.7
+    success criterion against REAL slither output, not
+    synthetic annotations.
+
+    Real Trailmark SARIF descriptions are shaped like
+    `"[WARNING] 0-1-weak-prng: ... (Slither)"` — uppercase
+    bracketed prefix. The current `_render_risks` filters by
+    `source` (chunk-4.7 cross-cutting fix C1), so SARIF
+    findings always route to the plain-bullet path regardless
+    of description shape. This test pins that contract
+    end-to-end: parse Tier 1, run slither, augment_sarif,
+    render a node note for a contract with findings, assert
+    the Risks section contains a real slither rule rendered
+    as a plain bullet (NO wikilink). Catches any regression
+    where SARIF findings accidentally match the curated path
+    (e.g., a future Trailmark version that drops the .upper()
+    on the level prefix)."""
+    monkeypatch.setenv("SOLC_VERSION", "0.5.16")
+    repo = tmp_path / "tier1"
+    shutil.copytree(TIER1_FIXTURE, repo)
+    cache_root = tmp_path / "cache"
+    gid = trailmark_parse(
+        str(repo), language="solidity", cache_root=cache_root,
+    )
+    sarif = tmp_path / "tier1.sarif"
+    run_slither(
+        repo / "contracts", sarif,
+        project_root=repo, timeout=120.0,
+    )
+    result = augment_sarif(gid, sarif, cache_root=cache_root)
+    assert result["matched_findings"] >= 1, (
+        f"expected slither findings to attach; got {result}"
+    )
+
+    # Pick the first node that has a finding annotation.
+    finding_nodes = nodes_with_annotation(
+        gid, "finding", cache_root=cache_root,
+    )
+    assert finding_nodes, "expected ≥1 node with findings"
+    target_node = finding_nodes[0]
+    # finding_nodes entries have a "findings" key with the
+    # annotation dicts; we render the node, not the findings.
+
+    vault = tmp_path / "vault"
+    out_path = render_and_write_node_note(
+        vault, gid, target_node, {}, "Overview body.",
+        cache_root=cache_root,
+    )
+    body = Path(out_path).read_text()
+
+    # Section is populated (not the empty placeholder).
+    assert "## Risks" in body
+    assert "_No risks recorded._" not in body
+
+    # Real slither descriptions are bracketed but UPPERCASE
+    # and source="sarif:Slither" — must render as plain
+    # bullet, NOT as a `[[risks/...]]` wikilink.
+    assert "[[risks/" not in body, (
+        f"SARIF findings must NOT produce risks/ wikilinks; "
+        f"body:\n{body}"
+    )
+
+    # At least one slither-shaped rule ID appears in the
+    # rendered output. Slither rule IDs match `\d-\d-...`
+    # (e.g., 0-1-weak-prng, 1-1-reentrancy-no-eth).
+    import re
+    assert re.search(r"\d-\d-[a-z-]+", body), (
+        f"expected at least one slither rule ID in Risks "
+        f"section; body:\n{body}"
+    )

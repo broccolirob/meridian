@@ -158,6 +158,31 @@ def test_augment_sarif_raises_when_sarif_missing(tmp_path):
         augment_sarif(gid, missing, cache_root=cache_root)
 
 
+def test_augment_sarif_rejects_oversized_sarif(tmp_path):
+    """Cross-cutting review fix (I5): SARIF is attacker-facing
+    input from analyzers running on attacker-supplied code.
+    A malicious slither plugin or semgrep rule pack can emit
+    arbitrarily large SARIF; Trailmark's json.load() has no
+    streaming or cap. Wrapper caps at 50MB. Test pins this
+    contract with a 51MB sparse file (cheap to create — file
+    system reports the truncated size without storing
+    physical bytes)."""
+    cache_root = tmp_path / "cache"
+    gid = trailmark_parse(
+        str(TIER1_FIXTURE),
+        language="solidity",
+        cache_root=cache_root,
+    )
+    oversized = tmp_path / "huge.sarif"
+    with oversized.open("wb") as f:
+        # 51 MB sparse file. File-system reports the full
+        # apparent size via stat().st_size without storing
+        # 51 MB of zeros.
+        f.truncate(51 * 1024 * 1024)
+    with pytest.raises(ValueError, match="SARIF too large"):
+        augment_sarif(gid, oversized, cache_root=cache_root)
+
+
 def test_augment_sarif_raises_on_malformed_graph_id(tmp_path):
     """Standard graph_id validation (via load_graph) surfaces
     before any augmentation work."""

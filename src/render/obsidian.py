@@ -429,6 +429,15 @@ def _render_events_etc(node: dict[str, Any]) -> str:
 
 def _render_annotations(graph_ctx: dict[str, Any]) -> str:
     annotations = graph_ctx.get("annotations") or []
+    # Findings (kind="finding") are owned by the Risks section
+    # — `_render_risks` pulls them from the graph via
+    # `annotations_of(kind="finding")`. Filter them out here
+    # so an LLM that accidentally also includes finding-kind
+    # entries in graph_ctx["annotations"] doesn't produce
+    # double bullets across the two sections.
+    annotations = [
+        a for a in annotations if a.get("kind") != "finding"
+    ]
     if not annotations:
         return "## Annotations\n\n_No annotations yet._\n"
     out = ["## Annotations\n\n"]
@@ -441,17 +450,30 @@ def _render_annotations(graph_ctx: dict[str, Any]) -> str:
     return "".join(out)
 
 
+# Source field identifying findings synthesized by
+# RiskSynthesizer (chunk 4.5). The subagent prompt
+# (`src/subagents.py:_RISK_SYNTHESIZER_PROMPT`) requires this
+# value when calling `annotate()`. Used by `_render_risks` to
+# route curated findings (linked wikilinks to the risk note)
+# vs raw SARIF findings (plain bullets) — switching from the
+# old description-prefix regex to a source check eliminates
+# a near-miss collision with Trailmark's SARIF description
+# format `[WARNING] rule-id: msg (Tool)` which is one
+# `.upper()` call away from looking like a curated prefix.
+_RISK_SYNTHESIZER_SOURCE = "risk-synthesizer"
+
 # Mirrors the kebab-case allowlist in `_RISK_NAME_RE` (the
 # pattern `render_and_write_risk_note` enforces on risk_name).
 # Anchored to fail closed: malformed brackets fall through to
 # plain-text rendering rather than producing broken wikilinks
 # from LLM-hallucinated prefixes like `[Hotspots]`,
-# `[has space]`, or `[trailing-]`.
+# `[has space]`, or `[trailing-]`. Applied ONLY to
+# risk-synthesizer-sourced descriptions, not all
+# `kind="finding"` descriptions.
 #
 # Intentionally NOT re.DOTALL: RiskSynthesizer's prompt
-# (`src/subagents.py:_RISK_SYNTHESIZER_PROMPT`) contracts a
-# one-line reason. DOTALL would let `(.+)` swallow newlines
-# from a malicious description like
+# contracts a one-line reason. DOTALL would let `(.+)`
+# swallow newlines from a malicious description like
 # `"[hotspots] benign\n- [[../../evil|x]] — injected"`,
 # turning one annotation into two rendered bullets — a
 # prompt-injection vector since descriptions ultimately come
@@ -494,11 +516,19 @@ def _render_risks(graph_ctx: dict[str, Any]) -> str:
     populated by `render_and_write_node_note`. Each entry is a
     dict with `kind`, `description`, `source`.
 
-    Two shapes render differently:
-    - RiskSynthesizer descriptions match `[<risk_name>]
-      <reason>` and render as wikilinks to
-      `vault/risks/<risk_name>.md`.
-    - SARIF descriptions (no prefix) render as plain bullets.
+    Two paths, distinguished by `source`:
+    - `source="risk-synthesizer"` → curated. Parse the
+      `[<risk_name>] <reason>` prefix and render as a
+      wikilink to `vault/risks/<risk_name>.md`. Fall back to
+      a plain bullet if the prefix is malformed.
+    - Any other source (typically `"sarif:Slither"`,
+      `"sarif:semgrep"`) → raw. Render as a plain bullet.
+
+    Filtering on `source` instead of the description shape
+    avoids a near-miss collision with Trailmark's SARIF
+    description format `[WARNING] rule-id: msg (Tool)`, which
+    is structurally one `.upper()` call away from looking
+    like a curated `[hotspots] ...` prefix.
 
     RiskSynthesizer items render first so the auditor reads
     the LLM's curated prioritization before raw analyzer
@@ -508,11 +538,12 @@ def _render_risks(graph_ctx: dict[str, Any]) -> str:
     caller's job):
 
     1. Markdown-injection defense: every rendered description
-       is flattened to a single line via `_flatten_to_one_line`
-       before interpolation. Auditor-supplied solidity
-       comments can poison LLM finding descriptions; a literal
-       `\\n` in the description would otherwise inject extra
-       bullets or fake headings into the auditor's note.
+       is flattened to a single line + link-syntax defanged
+       via `_flatten_to_one_line` before interpolation.
+       Auditor-supplied Solidity comments can poison LLM
+       finding descriptions; a literal `\\n` or embedded
+       `[[../evil]]` would otherwise inject extra bullets,
+       fake headings, or vault-traversal wikilinks.
 
     2. Idempotency: duplicate annotations (same flattened
        description) collapse to one bullet via
@@ -530,14 +561,24 @@ def _render_risks(graph_ctx: dict[str, Any]) -> str:
         desc = _flatten_to_one_line(f.get("description") or "")
         if not desc:
             continue
-        m = _RISK_PREFIX_RE.match(desc)
-        if m:
-            risk_name = m.group(1)
-            reason = _flatten_to_one_line(m.group(2))
-            curated.append(
-                f"- [[risks/{risk_name}|{risk_name}]] — {reason}"
-            )
+        if f.get("source") == _RISK_SYNTHESIZER_SOURCE:
+            # Curated path. Parse the bracketed kebab-case
+            # prefix; if the LLM produced a malformed prefix
+            # (hallucinated despite the prompt allowlist),
+            # render as a plain bullet rather than building
+            # a broken wikilink.
+            m = _RISK_PREFIX_RE.match(desc)
+            if m:
+                risk_name = m.group(1)
+                reason = _flatten_to_one_line(m.group(2))
+                curated.append(
+                    f"- [[risks/{risk_name}|{risk_name}]] — {reason}"
+                )
+            else:
+                raw.append(f"- {desc}")
         else:
+            # Raw path: SARIF findings (source="sarif:Slither"
+            # etc.) and any other non-curated finding.
             raw.append(f"- {desc}")
 
     # Order-preserving dedup. dict.fromkeys keeps the

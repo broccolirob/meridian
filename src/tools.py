@@ -264,6 +264,68 @@ def clear_annotations(
     return result
 
 
+def clear_annotations_by_source(
+    graph_id: str,
+    source: str,
+    *,
+    kind: str | None = None,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> int:
+    """Remove all annotations matching `source` (and optionally
+    `kind`) from every node in the graph. Returns the count of
+    removed entries.
+
+    Trailmark's API is append-only and its `clear_annotations`
+    only filters by kind, not source. This helper closes the
+    gap so dispatchers can make re-runs idempotent — mirrors
+    the `clear_augmented("sarif")` pattern Trailmark uses
+    internally for `augment_sarif`. Used by chunk 4.6's
+    `dispatch_risk_synthesis` to clear prior
+    `source="risk-synthesizer"` finding annotations before
+    a re-run multiplies them.
+
+    Same concurrency model as `annotate`/`clear_annotations`:
+    deepcopy under _ANNOTATE_LOCK + atomic save_graph.
+    """
+    kind_enum = (
+        _to_annotation_kind(kind) if kind is not None else None
+    )
+    removed = 0
+    with _ANNOTATE_LOCK:
+        engine = copy.deepcopy(
+            load_graph(graph_id, cache_root=cache_root)
+        )
+        # Trailmark's QueryEngine doesn't expose annotation
+        # mutation by-source through its public API; reach
+        # into the underlying graph store. The deepcopy above
+        # isolates this mutation from concurrent readers,
+        # matching the pattern in `annotate` /
+        # `clear_annotations`. If Trailmark grows a public
+        # `clear_annotations_by_source` later, swap to that.
+        graph = engine._store._graph  # noqa: SLF001
+        for node_id in list(graph.annotations.keys()):
+            anns = graph.annotations[node_id]
+            # Keep an annotation if (source doesn't match) OR
+            # (kind was specified AND kind doesn't match).
+            # Removes annotations where source matches AND
+            # (kind matches OR kind is None).
+            keep = [
+                a for a in anns
+                if a.source != source
+                or (kind_enum is not None and a.kind != kind_enum)
+            ]
+            removed += len(anns) - len(keep)
+            if keep:
+                graph.annotations[node_id] = keep
+            else:
+                del graph.annotations[node_id]
+        if removed > 0:
+            save_graph(
+                engine, graph_id, cache_root=cache_root
+            )
+    return removed
+
+
 def augment_sarif(
     graph_id: str,
     sarif_path: str | Path,
@@ -307,6 +369,23 @@ def augment_sarif(
     if not sarif.exists():
         raise FileNotFoundError(
             f"sarif_path does not exist: {sarif}"
+        )
+    # Size cap: SARIF is auditor-facing input from analyzers
+    # (slither, semgrep) running on attacker-supplied code.
+    # A malicious slither plugin or semgrep rule pack from the
+    # public registry can emit arbitrarily large SARIF.
+    # Trailmark's `json.load(f)` has no streaming or upstream
+    # cap; an attacker can OOM the audit run. Tier 1 (Uniswap)
+    # produces ~80 findings → ~50KB. 50MB is generous headroom
+    # for genuine multi-tool, deep-rule scans on large repos
+    # while still bounding the worst case.
+    _MAX_SARIF_BYTES = 50 * 1024 * 1024
+    sarif_size = sarif.stat().st_size
+    if sarif_size > _MAX_SARIF_BYTES:
+        raise ValueError(
+            f"SARIF too large: {sarif_size} bytes > "
+            f"{_MAX_SARIF_BYTES} bytes cap. Adversarial "
+            f"analyzer output suspected; refusing to load."
         )
     with _ANNOTATE_LOCK:
         # Deep-copy the cached instance before mutating. Same

@@ -145,6 +145,79 @@ def test_passes_focused_filter_to_dispatch_flows(
     assert captured["skip_leaf_entrypoints"] is False
 
 
+def test_dispatches_node_not_on_attack_surface(
+    trace_module, monkeypatch, tmp_path
+):
+    """The harness must dispatch FlowTracer even when the
+    requested node isn't on the attack surface — e.g., when
+    iterating on internal helpers like _safeTransfer. The
+    warning at scripts/trace_one_flow.py promises "FlowTracer
+    will still run"; a filter that only narrowed the
+    attack_surface() input would silently produce FLOWS:0
+    instead, contradicting the warning."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+
+    captured: dict = {}
+
+    def fake_dispatch_flows(*args, **kwargs):
+        # Simulate dispatch_flows applying the filter to its
+        # real attack_surface() result — input list does NOT
+        # contain the internal helper we requested. Filter
+        # must still return our target.
+        fake_surface = [
+            {"node_id": "contracts.UniswapV2Pair:UniswapV2Pair.swap"},
+            {"node_id": "contracts.UniswapV2Pair:UniswapV2Pair.mint"},
+        ]
+        filtered = kwargs["entrypoint_filter"](fake_surface)
+        captured["filtered"] = filtered
+        return {
+            "graph_id": "abc",
+            "entrypoint_count": len(filtered),
+            "successes": [
+                {"node_id": e["node_id"], "agent_reply": "/n.md"}
+                for e in filtered
+            ],
+            "failures": [],
+            "order": [e["node_id"] for e in filtered],
+        }
+
+    monkeypatch.setattr(
+        trace_module, "dispatch_flows", fake_dispatch_flows
+    )
+
+    # _safeTransfer is a `private` Solidity function in the
+    # Tier 1 fixture — exists in the graph but is NOT on
+    # attack_surface().
+    target = (
+        "contracts.UniswapV2Pair:UniswapV2Pair._safeTransfer"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "trace_one_flow.py",
+            target,
+            "--repo",
+            "tests/fixtures/tier1_uniswap_v2",
+            "--vault",
+            str(tmp_path),
+        ],
+    )
+
+    rc = trace_module.main()
+    assert rc == 0, (
+        f"non-surface node should still dispatch + succeed; "
+        f"got rc={rc}. The filter must return the requested "
+        f"entrypoint even when attack_surface() doesn't "
+        f"contain it."
+    )
+    assert captured["filtered"] == [{"node_id": target}], (
+        f"filter should produce a single-entry list with the "
+        f"requested entrypoint regardless of the attack_surface "
+        f"input; got {captured['filtered']!r}"
+    )
+
+
 def test_no_module_global_mutation(
     trace_module, monkeypatch, tmp_path
 ):

@@ -108,16 +108,22 @@ def main() -> int:
     print(f"[3/3] Running FlowTracer on {args.model}...")
 
     # Scope dispatch to ONE entrypoint via the entrypoint_filter
-    # parameter (chunk 3.15 replaced the prior monkey-patch of
+    # parameter (replaces the prior monkey-patch of
     # src.agent.attack_surface). No module-global mutation; the
     # filter is a per-call argument.
+    #
+    # Unconditionally returns the requested entrypoint, even if
+    # it isn't in the attack_surface() input. The harness's
+    # purpose is iterating on FlowTracer against ANY documentable
+    # node (internal helpers like _safeTransfer, etc.) — a filter
+    # that only narrowed the surface list would silently produce
+    # FLOWS:0 for any non-surface node, contradicting the warning
+    # above that promises "FlowTracer will still run". Get-node
+    # validation upstream already guarantees the node exists.
     def _only_this_entrypoint(
         entrypoints: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        return [
-            e for e in entrypoints
-            if e["node_id"] == args.entrypoint_id
-        ]
+        return [{"node_id": args.entrypoint_id}]
 
     result = dispatch_flows(
         graph_id,

@@ -268,12 +268,10 @@ def test_risks_section_rejects_header_injection():
 
 
 def test_risks_section_defangs_inline_wikilink_and_markdown_link():
-    """Chunk 4.7 review fix: even after whitespace flattening,
-    attacker-chosen wikilink targets `[[../../etc/passwd]]`
-    and markdown links `[trusted](http://evil)` embedded in a
-    single-line description would still render as clickable
-    links. Defang both inline by inserting a space inside the
-    syntax markers — visible text survives, link is inert."""
+    """Chunk 4.7 + Codex review fix (F4): defang wikilink,
+    markdown-link, AND bare-URL syntax. Each injection
+    vector produces visible-but-inert text instead of a
+    clickable link."""
     ctx = {
         "finding_annotations": [
             _finding(
@@ -283,15 +281,129 @@ def test_risks_section_defangs_inline_wikilink_and_markdown_link():
         ],
     }
     out = _render_risks(ctx)
-    # The injected wikilink/markdown-link syntax is BROKEN:
-    # `[[` becomes `[ [` and `](` becomes `] (`.
+    # Wikilink and markdown-link syntax both BROKEN.
     assert "[[../../etc/passwd" not in out
     assert "](http://evil" not in out
+    # Bare URL also defanged (chunk-Codex F4): `://` → `:[//]`.
+    assert "http://evil" not in out
     # Defanged forms ARE present (visible-but-inert).
     assert "[ [../../etc/passwd" in out
-    assert "] (http://evil" in out
+    assert "] (http:[//]evil" in out
     # The curated wikilink we synthesize ourselves is intact.
     assert "[[risks/hotspots|hotspots]]" in out
+
+
+def test_risks_section_defangs_html_tags():
+    """Codex review fix (F4): raw HTML renders inline in
+    Obsidian. `<iframe>`, `<a href=...>`, `<script>` would
+    all be active. HTML-escape `<`, `>`, `&` so the tags
+    render as literal text."""
+    ctx = {
+        "finding_annotations": [
+            _finding(
+                '[hotspots] <iframe src="https://evil"></iframe> '
+                'and <a href="file:///etc/passwd">click</a>'
+            ),
+            _raw(
+                'raw-rule: <script>alert(1)</script>'
+            ),
+        ],
+    }
+    out = _render_risks(ctx)
+    # No raw HTML left — all tags rendered as entities.
+    assert "<iframe" not in out
+    assert "<script>" not in out
+    assert "<a href" not in out
+    # Entity-encoded forms appear (visible, inert).
+    assert "&lt;iframe" in out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+
+
+def test_risks_section_defangs_dangerous_uri_schemes():
+    """Codex review fix (F4): schemes that don't use `://`
+    must be defanged inline. `javascript:`, `data:`, `file:`,
+    `obsidian:` are all click-handlers an attacker could
+    point at malicious targets."""
+    ctx = {
+        "finding_annotations": [
+            _finding(
+                "[hotspots] visit javascript:alert(1) "
+                "or data:text/html,<script>x</script> "
+                "or file:///etc/passwd "
+                "or obsidian://action?cmd=evil"
+            ),
+        ],
+    }
+    out = _render_risks(ctx)
+    # All bare-scheme URIs defanged: `scheme:` → `scheme[:]`.
+    assert "javascript:" not in out
+    assert "data:" not in out
+    assert "file:" not in out
+    assert "obsidian:" not in out
+    assert "javascript[:]" in out
+    assert "data[:]" in out
+    assert "file[:]" in out
+    assert "obsidian[:]" in out
+
+
+def test_risks_section_defangs_code_fences():
+    """Codex review fix (F4): a fenced code block in the
+    finding description could hide instruction-like text the
+    auditor might copy-paste (`rm -rf $HOME/.ssh`). Three+
+    backticks → HTML-entity backticks. The visual stays
+    similar but the parser doesn't recognize a fence."""
+    ctx = {
+        "finding_annotations": [
+            _raw(
+                "rule: ```bash\nrm -rf $HOME/.ssh\n```"
+            ),
+        ],
+    }
+    out = _render_risks(ctx)
+    # No 3-backtick run left — replaced with entity form.
+    assert "```" not in out
+    # Entity form present (renders as visible backticks but
+    # NOT as code-fence delimiter).
+    assert "&#x60;&#x60;&#x60;" in out
+    # The instruction text survives (entity-escaped only
+    # where it has HTML-special chars; `$` is preserved).
+    assert "rm -rf" in out
+
+
+def test_risks_section_defangs_dataview_inline_queries():
+    """Codex round-19 fix: Obsidian's Dataview plugin
+    EXECUTES single-backtick inline queries:
+        `= some_dql_expression`
+        `$= some_dataviewjs_expression`
+    If enabled, an attacker-controlled finding description
+    with such a payload runs arbitrary Dataview JavaScript
+    in the auditor's vault. `_defang_text` now escapes ALL
+    backticks (not just 3+ fenced runs), so the inline
+    query never reaches the Dataview parser.
+
+    This is the load-bearing test for the round-19
+    single-backtick defense — three vectors covered:
+    Dataview-DQL (`= ...`), DataviewJS (`$= ...`), and
+    plain single-backtick code spans (which Dataview
+    doesn't execute but other plugins might)."""
+    ctx = {
+        "finding_annotations": [
+            _raw("DQL: `= file.size` snooping vault metadata"),
+            _raw("DJS: `$= dv.pages('').file.path` exfil"),
+            _raw("inline: `function_name()` reference"),
+        ],
+    }
+    out = _render_risks(ctx)
+    # No single backticks survived ANYWHERE.
+    assert "`" not in out, (
+        f"backtick reached the rendered output: {out}"
+    )
+    # Entity form present (renders as visible `` but the
+    # parser doesn't recognize it as a code-span / Dataview
+    # delimiter).
+    assert "&#x60;= file.size&#x60;" in out
+    assert "&#x60;$= dv.pages" in out
+    assert "&#x60;function_name()&#x60;" in out
 
 
 def test_risks_section_dedupes_duplicate_annotations():
@@ -369,6 +481,87 @@ def fresh_tier0(tier0_dir, tmp_path):
     return gid, cache_root
 
 
+def test_node_overview_defangs_markdown_injection(
+    fresh_tier0, tmp_path,
+):
+    """Codex round-13 fix: `_render_overview` interpolates
+    LLM-authored body verbatim, and node notes go through
+    this path. Block-level + inline injection (heading,
+    wikilink, HTML) must be neutralized inside the
+    overview."""
+    from src.render.obsidian import render_and_write_node_note
+    from src.tools import get_node
+
+    gid, cache_root = fresh_tier0
+    node = get_node(
+        gid, "src.tokens.ERC20:ERC20", cache_root=cache_root,
+    )
+    malicious_body = (
+        "Real prose.\n\n"
+        "## INJECTED HEADING\n\n"
+        "[[../../etc/passwd]] "
+        '<iframe src="https://evil"></iframe>'
+    )
+    out = render_and_write_node_note(
+        tmp_path, gid, node, {}, malicious_body,
+        cache_root=cache_root,
+    )
+    body = Path(out).read_text()
+    # No active wikilink / HTML / line-start H2.
+    assert "[[../../etc/passwd]]" not in body
+    assert "<iframe" not in body
+    import re as _re
+    # The only H2s should be canonical section headings,
+    # not the attacker's "INJECTED HEADING".
+    injected = _re.findall(
+        r"^## INJECTED .*$", body, flags=_re.MULTILINE,
+    )
+    assert injected == [], (
+        f"line-start H2 injection survived; lines: {injected}"
+    )
+
+
+def test_render_annotations_defangs_field_injection():
+    """Codex round-13 fix: `_render_annotations`
+    interpolates LLM-authored `kind`, `source`, and
+    `description` into bullet lines. Defang each so
+    embedded markdown/HTML/URI-scheme content can't break
+    out of the bullet."""
+    from src.render.obsidian import _render_annotations
+
+    ctx = {
+        "annotations": [
+            {
+                "kind": "assumption",
+                "source": "<iframe src=https://evil>",
+                "description": (
+                    "Plain text.\n## INJECTED HEADING\n"
+                    "[[../../etc/passwd]] "
+                    "Click file:///etc/shadow"
+                ),
+            },
+        ],
+    }
+    out = _render_annotations(ctx)
+    # No raw HTML, wikilink, or dangerous URI scheme.
+    assert "<iframe" not in out
+    assert "[[../../etc/passwd]]" not in out
+    assert "file:///etc/shadow" not in out
+    # No line-start H2 (the multi-line description was
+    # flattened to one line, so no `\n## ` survives).
+    import re as _re
+    h2_lines = _re.findall(
+        r"^## .+$", out, flags=_re.MULTILINE,
+    )
+    assert h2_lines == ["## Annotations"], (
+        f"unexpected H2s: {h2_lines}"
+    )
+    # Defanged inline forms survive (visible but inert).
+    assert "&lt;iframe" in out
+    assert "[ [../../etc/passwd]]" in out
+    assert "file[:]" in out
+
+
 def test_render_annotations_filters_out_finding_kind():
     """Cross-cutting review fix (I1): the Annotations section
     must NOT render `kind="finding"` entries. Those are owned
@@ -397,13 +590,93 @@ def test_render_annotations_filters_out_finding_kind():
     assert "**assumption**" in out
     assert "transfer assumes prior approval" in out
     assert "**invariant**" in out
-    assert "totalSupply >= sum(balances)" in out
+    # Codex round-13 fix: annotation description is now
+    # HTML-escaped (`>` → `&gt;`). Visually identical in
+    # rendered HTML but the source is defanged so a
+    # malicious `>` followed by attacker HTML can't break
+    # out of the bullet body.
+    assert "totalSupply &gt;= sum(balances)" in out
     # Finding-kind entries are SILENTLY DROPPED here (rendered
     # by _render_risks instead). They must not appear under
     # the Annotations section.
     assert "**finding**" not in out
     assert "would-double-render" not in out
     assert "raw sarif finding" not in out
+
+
+def test_method_findings_bubble_up_to_parent_contract(
+    fresh_tier0, tmp_path,
+):
+    """Codex review fix (F3): slither/semgrep attach findings
+    at method-level granularity (e.g.,
+    `contracts.UniswapV2Pair:UniswapV2Pair._update`). Methods
+    are documented INSIDE their parent's note —
+    render_and_write_node_note rejects method-kind nodes. So
+    method-level findings must bubble up to the parent
+    container's Risks section, otherwise the auditor never
+    sees them.
+
+    Pin the contract: annotate a method, render its parent
+    contract, assert the finding appears in the parent
+    note."""
+    gid, cache_root = fresh_tier0
+    method_id = "src.tokens.ERC20:ERC20.transfer"
+    parent_id = "src.tokens.ERC20:ERC20"
+
+    # Method-level finding (raw SARIF-shape).
+    annotate(
+        gid, method_id, "finding",
+        "1-1-reentrancy-no-eth: external call before state write",
+        source="sarif:Slither", cache_root=cache_root,
+    )
+
+    parent_node = get_node(gid, parent_id, cache_root=cache_root)
+    vault = tmp_path / "vault"
+    out_path = render_and_write_node_note(
+        vault, gid, parent_node, {}, "Overview.",
+        cache_root=cache_root,
+    )
+    body = Path(out_path).read_text()
+
+    # Method finding bubbles up — appears in parent's Risks
+    # section as a plain bullet (SARIF source).
+    assert "## Risks" in body
+    assert "_No risks recorded._" not in body
+    assert "1-1-reentrancy-no-eth" in body, (
+        f"method-level finding must bubble up to parent note; "
+        f"body:\n{body}"
+    )
+
+
+def test_finding_bubble_filters_to_container_descendants(
+    fresh_tier0, tmp_path,
+):
+    """Codex review fix (F3): the prefix filter must NOT
+    accidentally pick up unrelated nodes. ID prefix matching
+    is strict: `<container_id>.` (with trailing dot)."""
+    gid, cache_root = fresh_tier0
+    # Attach finding to an UNRELATED method (different parent).
+    annotate(
+        gid, "src.tokens.ERC4626:ERC4626.deposit", "finding",
+        "unrelated-finding-do-not-bubble",
+        source="sarif:Slither", cache_root=cache_root,
+    )
+    # Render ERC20 (the OTHER contract). Its Risks section
+    # should be empty because the finding is on ERC4626.
+    parent_node = get_node(
+        gid, "src.tokens.ERC20:ERC20", cache_root=cache_root,
+    )
+    vault = tmp_path / "vault"
+    out_path = render_and_write_node_note(
+        vault, gid, parent_node, {}, "Overview.",
+        cache_root=cache_root,
+    )
+    body = Path(out_path).read_text()
+    assert "unrelated-finding-do-not-bubble" not in body, (
+        f"prefix filter leaked finding from another container; "
+        f"body:\n{body}"
+    )
+    assert "_No risks recorded._" in body
 
 
 def test_render_and_write_node_note_fetches_finding_annotations(
@@ -509,6 +782,15 @@ def test_tier1_real_slither_finding_renders_as_plain_bullet(
     (e.g., a future Trailmark version that drops the .upper()
     on the level prefix)."""
     monkeypatch.setenv("SOLC_VERSION", "0.5.16")
+    # TEST-ONLY: bypass build_analyzer_env's HOME isolation
+    # so slither can reach ~/.solc-select/artifacts/ (Codex
+    # follow-up F1 removed the symlink). Production runs use
+    # the isolated env.
+    import os
+    monkeypatch.setattr(
+        "src.analyzers.slither.build_analyzer_env",
+        lambda **_kw: os.environ.copy(),
+    )
     repo = tmp_path / "tier1"
     shutil.copytree(TIER1_FIXTURE, repo)
     cache_root = tmp_path / "cache"
@@ -525,25 +807,51 @@ def test_tier1_real_slither_finding_renders_as_plain_bullet(
         f"expected slither findings to attach; got {result}"
     )
 
-    # Pick the first node that has a finding annotation.
+    # Pin the cross-cutting Codex review fix (F3): slither
+    # attaches findings at METHOD-level granularity, e.g.,
+    # `contracts.UniswapV2Pair:UniswapV2Pair._update`.
+    # render_and_write_node_note rejects method-kind nodes
+    # (they document inside parents). So we must render the
+    # CONTAINER and assert method findings bubble up.
     finding_nodes = nodes_with_annotation(
         gid, "finding", cache_root=cache_root,
     )
     assert finding_nodes, "expected ≥1 node with findings"
-    target_node = finding_nodes[0]
-    # finding_nodes entries have a "findings" key with the
-    # annotation dicts; we render the node, not the findings.
+
+    # Find a method-kind finding node, then render its
+    # parent container.
+    method_nid = None
+    for n in finding_nodes:
+        if n.get("kind") == "method":
+            method_nid = n["id"]
+            break
+    assert method_nid is not None, (
+        f"expected ≥1 method-kind finding on Tier 1; got "
+        f"{[(n.get('kind'), n.get('id')) for n in finding_nodes]}"
+    )
+    # Method ID is `<container>.<method_name>` — strip the
+    # last `.<segment>` to get the container.
+    container_nid = method_nid.rsplit(".", 1)[0]
+    container_node = get_node(
+        gid, container_nid, cache_root=cache_root,
+    )
 
     vault = tmp_path / "vault"
     out_path = render_and_write_node_note(
-        vault, gid, target_node, {}, "Overview body.",
+        vault, gid, container_node, {}, "Overview body.",
         cache_root=cache_root,
     )
     body = Path(out_path).read_text()
 
-    # Section is populated (not the empty placeholder).
+    # Section is populated (not the empty placeholder) —
+    # proves the method-level finding bubbled up to the
+    # parent container's note.
     assert "## Risks" in body
-    assert "_No risks recorded._" not in body
+    assert "_No risks recorded._" not in body, (
+        f"expected method finding to bubble up to parent "
+        f"container note. method_nid={method_nid}, "
+        f"container_nid={container_nid}, body:\n{body}"
+    )
 
     # Real slither descriptions are bracketed but UPPERCASE
     # and source="sarif:Slither" — must render as plain

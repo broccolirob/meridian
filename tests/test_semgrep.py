@@ -162,6 +162,124 @@ def test_run_semgrep_supports_multiple_rule_configs(
     )
 
 
+# ---- attacker-suppression defenses (binary-gated) -------------
+
+@_SKIP_NO_BINARY
+def test_run_semgrep_ignores_repo_semgrepignore(
+    fresh_python_smol, tmp_path,
+):
+    """Codex round-19 fix: an attacker-supplied
+    `.semgrepignore` in the repo must NOT suppress findings.
+    Reproduces the Codex repro: adding `.semgrepignore`
+    containing `bad.py` made the pre-fix wrapper return 0
+    results. Post-fix: `--x-ignore-semgrepignore-files` is
+    passed, so the file is honored at the auditor's request
+    only, not the attacker's."""
+    # Attacker drops a .semgrepignore that hides bad.py.
+    (fresh_python_smol / ".semgrepignore").write_text("bad.py\n")
+    out = tmp_path / "semgrep.sarif"
+    run_semgrep(
+        fresh_python_smol, out,
+        rules=[_local_rules(fresh_python_smol)],
+    )
+    data = json.loads(out.read_text())
+    results = data["runs"][0].get("results", [])
+    assert len(results) >= 1, (
+        f"`.semgrepignore` suppressed findings — flag missing? "
+        f"results={results}"
+    )
+
+
+@_SKIP_NO_BINARY
+def test_run_semgrep_ignores_repo_gitignore(
+    fresh_python_smol, tmp_path,
+):
+    """Codex round-19 fix companion: semgrep defaults to
+    honoring `.gitignore` too. An attacker can drop a stock
+    `.gitignore` with `bad.py` to suppress findings the same
+    way. Post-fix: `--no-git-ignore` prevents this."""
+    (fresh_python_smol / ".gitignore").write_text("bad.py\n")
+    out = tmp_path / "semgrep.sarif"
+    run_semgrep(
+        fresh_python_smol, out,
+        rules=[_local_rules(fresh_python_smol)],
+    )
+    data = json.loads(out.read_text())
+    results = data["runs"][0].get("results", [])
+    assert len(results) >= 1, (
+        f"`.gitignore` suppressed findings — flag missing? "
+        f"results={results}"
+    )
+
+
+@_SKIP_NO_BINARY
+def test_run_semgrep_ignores_inline_nosem_comments(
+    fresh_python_smol, tmp_path,
+):
+    """Codex round-19 fix: `nosem` / `nosemgrep` comments
+    inline in source must NOT suppress findings. Attacker
+    drops the comment next to the vulnerable line; pre-fix
+    semgrep dropped the finding. Post-fix: `--disable-nosem`
+    is passed, so attacker comments are powerless to hide
+    findings."""
+    # Append nosem to every existing line of bad.py.
+    bad_py = fresh_python_smol / "bad.py"
+    suppressed = "\n".join(
+        f"{line}  # nosemgrep" if line.strip() else line
+        for line in bad_py.read_text().splitlines()
+    ) + "\n"
+    bad_py.write_text(suppressed)
+    out = tmp_path / "semgrep.sarif"
+    run_semgrep(
+        fresh_python_smol, out,
+        rules=[_local_rules(fresh_python_smol)],
+    )
+    data = json.loads(out.read_text())
+    results = data["runs"][0].get("results", [])
+    assert len(results) >= 1, (
+        f"`nosem` suppressed findings — flag missing? "
+        f"results={results}"
+    )
+
+
+@_SKIP_NO_BINARY
+def test_run_semgrep_disables_metrics_and_version_check(
+    fresh_python_smol, tmp_path,
+):
+    """Codex round-19 privacy: `--metrics off` and
+    `--disable-version-check` must be passed so a hermetic
+    run does NOT phone home to semgrep.dev. Pin the argv
+    shape by snooping subprocess.run via a wrapper."""
+    import src.analyzers.semgrep as semgrep_module
+
+    captured_argv: list[str] = []
+    real_run = semgrep_module.subprocess.run
+
+    def snoop_run(*args, **kwargs):
+        captured_argv.extend(list(args[0]))
+        return real_run(*args, **kwargs)
+
+    semgrep_module.subprocess.run = snoop_run  # type: ignore[assignment]
+    try:
+        out = tmp_path / "semgrep.sarif"
+        run_semgrep(
+            fresh_python_smol, out,
+            rules=[_local_rules(fresh_python_smol)],
+        )
+    finally:
+        semgrep_module.subprocess.run = real_run  # type: ignore[assignment]
+
+    assert "--metrics" in captured_argv
+    metric_val = captured_argv[captured_argv.index("--metrics") + 1]
+    assert metric_val == "off", (
+        f"--metrics value must be `off`; got {metric_val!r}"
+    )
+    assert "--disable-version-check" in captured_argv
+    assert "--x-ignore-semgrepignore-files" in captured_argv
+    assert "--no-git-ignore" in captured_argv
+    assert "--disable-nosem" in captured_argv
+
+
 # ---- binary-independent defense tests -------------------------
 
 def test_run_semgrep_rejects_empty_rules(tmp_path):
@@ -201,6 +319,42 @@ def test_run_semgrep_rejects_missing_repo(tmp_path):
             out,
             rules=["p/python"],   # never invoked; rule is irrelevant
         )
+
+
+def test_run_semgrep_rejects_repo_local_binary(monkeypatch, tmp_path):
+    """Codex round-12 fix: PATH-poisoning RCE defense.
+    Same as test_run_slither_rejects_repo_local_binary —
+    monkeypatch shutil.which to return a fake semgrep
+    inside the attacker repo, assert ValueError before
+    subprocess.run is ever called."""
+    attacker_repo = tmp_path / "attacker-repo"
+    attacker_repo.mkdir()
+    fake_semgrep = attacker_repo / "semgrep"
+    fake_semgrep.write_text("#!/bin/sh\ntouch /tmp/SEMGREP_PWNED\n")
+    fake_semgrep.chmod(0o755)
+
+    monkeypatch.setattr(
+        "src.analyzers.semgrep.shutil.which",
+        lambda _: str(fake_semgrep),
+    )
+
+    def _fail_if_called(*a, **k):
+        raise AssertionError(
+            "subprocess.run was called — rejection failed"
+        )
+    monkeypatch.setattr(
+        "src.analyzers.semgrep.subprocess.run",
+        _fail_if_called,
+    )
+
+    with pytest.raises(ValueError, match="refusing to execute"):
+        run_semgrep(
+            attacker_repo,
+            tmp_path / "out.sarif",
+            rules=["p/python"],
+        )
+
+    assert not Path("/tmp/SEMGREP_PWNED").exists()
 
 
 def test_run_semgrep_rejects_project_root_outside_repo(tmp_path):

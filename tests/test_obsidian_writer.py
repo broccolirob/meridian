@@ -74,14 +74,51 @@ def test_write_creates_parent_dirs_lazily(tmp_path):
 
 def test_write_rejects_path_traversal(tmp_path):
     vault = ensure_vault(tmp_path / "vault")
-    # `..` escape
-    with pytest.raises(ValueError, match="escapes vault"):
+    # `..` escape — Codex round-16 fix: now caught by the
+    # explicit `..`-segment check BEFORE the resolve-based
+    # containment check. Match message accordingly.
+    with pytest.raises(ValueError, match="traversal segment"):
         write_obsidian_note(vault, "../escaped.md", {}, "x")
-    # absolute path escape (Path / absolute drops the left side)
-    with pytest.raises(ValueError, match="escapes vault"):
+    # absolute path escape — caught by the explicit absolute-
+    # path check (a `/`-prefixed rel_path drops the vault on
+    # `Path /` join, then resolve()/relative_to() would also
+    # catch it, but the explicit reject fires first).
+    with pytest.raises(ValueError, match="must be relative to vault"):
         write_obsidian_note(vault, "/tmp/escaped.md", {}, "x")
     # Nothing got written outside the vault
     assert not (tmp_path / "escaped.md").exists()
+
+
+def test_write_rejects_in_vault_traversal(tmp_path):
+    """Codex round-16 fix: a `rel_path` like
+    `contracts/../risks/pwn.md` resolves to
+    `vault/risks/pwn.md` — IS inside the vault, so the
+    resolve-based containment check passes. But the route
+    jumped the kind-routed folder and gives the caller an
+    in-vault arbitrary-write primitive.
+
+    The `..`-segment reject catches this BEFORE the resolve
+    check, refusing any `rel_path` that contains a `..`
+    component regardless of whether the final resolved path
+    stays inside the vault.
+
+    Mirrors the `name="../risks/node-pwn"` LLM-forging
+    exploit that triggered the round-16 refetch contract."""
+    vault = ensure_vault(tmp_path / "vault")
+    # POSIX-form in-vault traversal.
+    with pytest.raises(ValueError, match="traversal segment"):
+        write_obsidian_note(
+            vault, "contracts/../risks/pwn.md", {}, "x",
+        )
+    # Windows-separator variant — Python on POSIX doesn't
+    # split `\` as a path separator natively, so we check
+    # explicitly. (Obsidian vaults can live on SMB mounts.)
+    with pytest.raises(ValueError, match="traversal segment"):
+        write_obsidian_note(
+            vault, "contracts\\..\\risks\\pwn.md", {}, "x",
+        )
+    # The risks folder must NOT have been created.
+    assert not (vault / "risks" / "pwn.md").exists()
 
 
 # --- atomic write ----------------------------------------------------

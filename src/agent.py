@@ -21,8 +21,11 @@ Three public entry points:
 """
 
 import concurrent.futures
+import contextvars
+import json
 import logging
 import re
+import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -147,6 +150,35 @@ Hard rules:
 """
 
 
+# Codex round-17 fix: cross-node overwrite defense.
+#
+# The dispatcher sets these contextvars before invoking the
+# agent for a specific node / entrypoint. The LLM-facing
+# writer wrappers read them as the AUTHORITATIVE id; the
+# LLM no longer supplies (or even sees) a `node` /
+# `entrypoint_node` argument. A prompt-injected agent that
+# tries to call the writer for a DIFFERENT node than the
+# one being dispatched simply can't address the cross-node
+# target — there is no `node` arg to forge.
+#
+# Why contextvars and not a closure-per-dispatch: `build_agent`
+# constructs ONE agent shared across all worker threads in
+# a `dispatch_topo` / `dispatch_flows` run (see the comment
+# on line 806). Per-dispatch closures would require
+# re-building the agent for every node, which is expensive.
+# `contextvars.ContextVar` is the standard library's
+# thread-local-with-proper-coroutine-semantics primitive;
+# values set in one thread are isolated from other threads,
+# and the agent's sync invoke chain inherits the context
+# from the calling thread.
+_EXPECTED_NODE_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_EXPECTED_NODE_ID",
+)
+_EXPECTED_ENTRYPOINT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_EXPECTED_ENTRYPOINT_ID",
+)
+
+
 def _wrap_subagent_writers(
     subagent: SubAgent, vault_path: str | Path
 ) -> SubAgent:
@@ -176,31 +208,68 @@ def _wrap_subagent_writers(
     """
     def _safe_write_node_note(
         graph_id: str,
-        node: dict[str, Any],
         graph_ctx: dict[str, Any] | None = None,
         body: str = "",
     ) -> str:
-        """Write a node note. The vault root is supplied by the
-        orchestrator at build time, not by the LLM. Same contract
-        as `render_and_write_node_note` minus `vault_path`."""
+        """Write a node note. The vault root AND the target
+        node id are supplied by the orchestrator at dispatch
+        time, not by the LLM.
+
+        Codex round-17 fix: the LLM no longer passes `node`.
+        The node id comes from `_EXPECTED_NODE_ID` (set by
+        `_invoke_one` before agent.invoke). The LLM-controlled
+        surface here is: graph_ctx + body. If the agent is
+        prompt-injected to "document a different node", it has
+        no argument through which to address the cross-node
+        target — the wrapper writes to the dispatched node
+        only."""
+        try:
+            expected_id = _EXPECTED_NODE_ID.get()
+        except LookupError as e:
+            raise RuntimeError(
+                "render_and_write_node_note called outside a "
+                "dispatch context (no _EXPECTED_NODE_ID bound). "
+                "Set the contextvar in the dispatcher before "
+                "invoking the agent."
+            ) from e
         return render_and_write_node_note(
-            vault_path, graph_id, node, graph_ctx, body
+            vault_path,
+            graph_id,
+            {"id": expected_id},
+            graph_ctx,
+            body,
         )
 
     def _safe_write_flow_note(
         graph_id: str,
-        entrypoint_node: dict[str, Any],
         paths: list[list[str]],
         overview: str = "",
         observations: list[str] | None = None,
     ) -> str:
-        """Write a flow note. The vault root is supplied by the
-        orchestrator at build time, not by the LLM. Same contract
-        as `render_and_write_flow_note` minus `vault_path`."""
+        """Write a flow note. The vault root AND the entrypoint
+        id are supplied by the orchestrator at dispatch time,
+        not by the LLM.
+
+        Codex round-17 fix: the LLM no longer passes
+        `entrypoint_node`. The entrypoint id comes from
+        `_EXPECTED_ENTRYPOINT_ID` (set by `_invoke_one` before
+        agent.invoke). Same cross-node defense as
+        `_safe_write_node_note` — a prompt-injected FlowTracer
+        cannot redirect the write to a different entrypoint's
+        flow note."""
+        try:
+            expected_id = _EXPECTED_ENTRYPOINT_ID.get()
+        except LookupError as e:
+            raise RuntimeError(
+                "render_and_write_flow_note called outside a "
+                "dispatch context (no _EXPECTED_ENTRYPOINT_ID "
+                "bound). Set the contextvar in the dispatcher "
+                "before invoking the agent."
+            ) from e
         return render_and_write_flow_note(
             vault_path,
             graph_id,
-            entrypoint_node,
+            {"id": expected_id},
             paths,
             overview,
             observations,
@@ -578,6 +647,14 @@ def _invoke_one(
     baked into `agent` via build_agent's system prompt and the
     _wrap_subagent_writers closures. The dispatcher binds vault
     once at agent construction; per-invoke routing isn't needed.
+
+    Codex round-17 fix: binds `_EXPECTED_NODE_ID` /
+    `_EXPECTED_ENTRYPOINT_ID` for the agent's invoke. The
+    writer wrappers read from these contextvars instead of
+    accepting `node` / `entrypoint_node` from the LLM —
+    closes the cross-node overwrite vector. Which var to set
+    is determined by the task template (NodeDocumenter vs
+    FlowTracer).
     """
     _validate_node_id(node_id)
     # graph_id is interpolated into the task template, so it's
@@ -588,9 +665,27 @@ def _invoke_one(
     task_msg = task_template.format(
         node_id=node_id, graph_id=graph_id
     )
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": task_msg}]}
-    )
+    if task_template is _NODE_DOC_TEMPLATE:
+        node_token = _EXPECTED_NODE_ID.set(node_id)
+        entry_token = None
+    elif task_template is _FLOW_TRACE_TEMPLATE:
+        entry_token = _EXPECTED_ENTRYPOINT_ID.set(node_id)
+        node_token = None
+    else:
+        # Future templates (e.g., risk synthesis) don't bind
+        # either contextvar — they don't go through the
+        # node/flow writer wrappers.
+        node_token = None
+        entry_token = None
+    try:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": task_msg}]}
+        )
+    finally:
+        if node_token is not None:
+            _EXPECTED_NODE_ID.reset(node_token)
+        if entry_token is not None:
+            _EXPECTED_ENTRYPOINT_ID.reset(entry_token)
     last = result["messages"][-1].content
     return {"node_id": node_id, "agent_reply": last}
 
@@ -1015,11 +1110,34 @@ def dispatch_risk_synthesis(
     treating a partial run as canonical.
 
     Returns:
-        {graph_id, ok, reply, error}. `ok=True` means the
-        agent returned without raising; the LLM may still
-        have produced an empty risks/ folder (e.g., no
-        findings to synthesize) — check `reply` for the
-        JSON list of paths.
+        {graph_id, ok, reply, error, staging_root}.
+        `ok=True` means the agent returned without raising.
+
+        `staging_root` is the absolute path to the per-run
+        staging directory the agent's writes were bound to
+        (`<vault>/.audit/risk-staging/<run_id>/`), or None
+        if dispatch failed before staging was created
+        (precondition_failed).
+
+        `reply` is a JSON list of file paths the agent
+        wrote into staging (NOT into the final vault). The
+        CALLER is responsible for verifying the staged
+        inventory against `should_have_notes` and any other
+        gates, THEN atomically promoting allowlisted
+        filenames into the final `vault/risks/`. On
+        verification failure, the caller should `rmtree`
+        `staging_root` and leave `vault/risks/` untouched.
+
+        Codex round-10 fix: the dispatcher previously
+        promoted on success before the script's trust gate
+        ran. A clean-graph reply that wrote all-three notes
+        passed `ok=True` and got promoted; only AFTER did
+        the script's gate notice the "clean graph, no notes
+        expected" violation and wipe. The promotion-to-wipe
+        window was exposed to crashes/SIGKILLs/Obsidian
+        watchers. Now: the dispatcher returns staging
+        metadata only. Final vault/risks/ remains untouched
+        until the caller's gate passes.
     """
     _validate_graph_id(graph_id)
     _validate_vault_path(vault_path)
@@ -1045,6 +1163,9 @@ def dispatch_risk_synthesis(
                 "subgraph registered). Risk synthesis depends "
                 "on preanalysis subgraphs."
             ),
+            # No staging created yet — caller has nothing
+            # to clean up.
+            "staging_root": None,
         }
 
     # Idempotency guard: clear prior risk-synthesizer
@@ -1063,9 +1184,32 @@ def dispatch_risk_synthesis(
         graph_id, "risk-synthesizer", kind="finding",
     )
 
+    # Staging-based write isolation (Codex rounds 9 + 10).
+    # The agent writes via a closure bound to staging, NOT
+    # to the real vault. The dispatcher RETURNS staging
+    # metadata; the caller verifies the staged inventory
+    # against trust gates (should_have_notes etc.) and
+    # promotes only allowlisted files into vault/risks/ on
+    # full pass. On failure, the caller `rmtree`s staging
+    # and vault/risks/ stays untouched.
+    #
+    # Round 9 (initial staging) closed the late-write race
+    # (timed-out workers reach staging only). Round 10
+    # moves promotion to the caller so the trust gate runs
+    # BEFORE any file reaches vault/risks/ — closing the
+    # promotion-to-wipe exposure window where a crash or
+    # Obsidian sync could surface attacker-controlled
+    # content between promote and rejection.
+    vault_root = Path(vault_path).resolve()
+    run_id = secrets.token_hex(8)
+    staging_root = (
+        vault_root / ".audit" / "risk-staging" / run_id
+    )
+    (staging_root / "risks").mkdir(parents=True, exist_ok=True)
+
     agent = build_agent(
         graph_id,
-        vault_path,
+        staging_root,  # staging, NOT real vault
         model=model,
         request_timeout=per_invoke_timeout - _REQUEST_TIMEOUT_BUFFER,
     )
@@ -1088,12 +1232,24 @@ def dispatch_risk_synthesis(
     try:
         future = pool.submit(_invoke)
         try:
-            reply = future.result(timeout=per_invoke_timeout)
+            # We ignore the LLM's reply content. The caller
+            # inventories `staging_root/risks/` directly —
+            # that's the only trustworthy source of "what
+            # was written".
+            future.result(timeout=per_invoke_timeout)
+            # SUCCESS: report which files landed in staging.
+            # No promotion here; the caller verifies + moves.
+            staging_risks = staging_root / "risks"
+            staged: list[str] = []
+            if staging_risks.is_dir():
+                for src in sorted(staging_risks.glob("*.md")):
+                    staged.append(str(src))
             return {
                 "graph_id": graph_id,
                 "ok": True,
-                "reply": reply,
+                "reply": json.dumps(staged),
                 "error": None,
+                "staging_root": str(staging_root),
             }
         except concurrent.futures.TimeoutError:
             future.cancel()
@@ -1106,6 +1262,7 @@ def dispatch_risk_synthesis(
                     f"exceeded — likely langgraph/deepagents "
                     f"deadlock"
                 ),
+                "staging_root": str(staging_root),
             }
         except Exception as e:
             return {
@@ -1113,6 +1270,16 @@ def dispatch_risk_synthesis(
                 "ok": False,
                 "reply": "",
                 "error": str(e),
+                "staging_root": str(staging_root),
             }
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        # NOTE: NO staging cleanup here. The caller owns
+        # the staging lifecycle (they need to inspect it
+        # for verification). They MUST `rmtree`
+        # `staging_root` on either success (after
+        # promotion) or failure (rejection). If they
+        # forget, the leftover lives under
+        # `.audit/risk-staging/<run_id>/` and gets wiped
+        # at the next process start (document_repo.py
+        # wipes the parent on startup).

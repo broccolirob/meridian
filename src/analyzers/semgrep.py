@@ -13,6 +13,11 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from src.analyzers.env import (
+    build_analyzer_env,
+    reject_repo_local_binary,
+)
+
 _DEFAULT_TIMEOUT_S = 300.0
 
 
@@ -131,6 +136,12 @@ def run_semgrep(
     else:
         cwd = repo
 
+    # Codex round-12 fix: refuse to execute a `semgrep`
+    # binary that resolves inside the analyzer cwd
+    # (PATH poisoning RCE defense — same rationale as
+    # run_slither).
+    reject_repo_local_binary(semgrep, analyzer_cwd=str(cwd))
+
     out = Path(out_sarif).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
     # Defense against stale-SARIF false-success: if a prior
@@ -144,6 +155,28 @@ def run_semgrep(
     argv: list[str] = [
         semgrep, "scan",
         "--sarif", "--output", str(out),
+        # Codex round-19 fix: a malicious repo can suppress
+        # findings via three default-on semgrep mechanisms:
+        #
+        #   1. `.semgrepignore` in the repo — Codex repro:
+        #      adding `.semgrepignore` with `bad.py` made the
+        #      wrapper return 0 results on python_smol.
+        #   2. `.gitignore` (semgrep honors git-ignored files
+        #      by default) — same suppression vector via a
+        #      stock `.gitignore` entry.
+        #   3. `nosem` comments inline in source — attacker
+        #      adds `# nosemgrep` to mark the vulnerable line
+        #      as exempt.
+        #
+        # Disable all three so the auditor sees the real
+        # findings against attacker-supplied code. Also turn
+        # off the telemetry/version-check pings — auditor
+        # privacy AND less network surface in a hermetic run.
+        "--x-ignore-semgrepignore-files",
+        "--no-git-ignore",
+        "--disable-nosem",
+        "--metrics", "off",
+        "--disable-version-check",
     ]
     for cfg in rules:
         argv.extend(["--config", cfg])
@@ -179,6 +212,15 @@ def run_semgrep(
             timeout=timeout,
             check=False,
             cwd=str(cwd),
+            # Allowlisted environment — semgrep can also run
+            # user-supplied scripts via certain rules and
+            # registry packs, plus we don't want
+            # OPENAI_API_KEY leaking through the auditor's
+            # session env. Same defense as run_slither.
+            # `analyzer_cwd` so PATH entries under the
+            # attacker-supplied repo are dropped (codex
+            # round-6 fix).
+            env=build_analyzer_env(analyzer_cwd=str(cwd)),
         )
     except subprocess.TimeoutExpired:
         # Best-effort cleanup of partial SARIF so a retry

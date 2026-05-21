@@ -42,6 +42,12 @@ def test_subagent_tools_cover_required_capabilities():
     assert "complexity_hotspots" in tool_names
     assert "list_subgraph_nodes" in tool_names
     assert "get_node" in tool_names
+    # Codex review fix: the prompt tells the LLM to read SARIF
+    # rule IDs from annotation descriptions. `get_node` does
+    # NOT return annotations — only node metadata. Without
+    # `annotations_of` in the tool surface, the LLM
+    # hallucinates or fails. Pin the contract.
+    assert "annotations_of" in tool_names
 
     # Wikilink resolution + side effects.
     assert "resolve_wikilink" in tool_names
@@ -177,6 +183,75 @@ def test_render_and_write_risk_note_accepts_involved_nodes_none(
     assert "nodes_count: 0" in body
 
 
+def test_render_and_write_risk_note_defangs_backtick_in_involved_node_fallback(
+    tier1_graph_id, tmp_path,
+):
+    """Codex round-11 fix: the involved-node wikilink
+    fallback path interpolates the bare node name into a
+    backticked inline code span (`` `{bare}` ``). If the
+    LLM supplies an invalid node ID containing a backtick,
+    the embedded backtick closes the span early and
+    everything after it renders as raw markdown — heading,
+    wikilink, etc. This is a real injection vector since
+    `involved_nodes` is LLM-controlled.
+
+    Pin the defang: backticks, newlines, wikilinks, and
+    HTML inside the bare label are neutralized before
+    interpolation."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    gid, cache_root = tier1_graph_id
+    malicious_nid = (
+        "fake:foo`## INJECTED HEADING\n"
+        "[[../../etc/passwd]] "
+        "<iframe src='https://evil.example'></iframe>"
+    )
+    out = render_and_write_risk_note(
+        tmp_path, gid,
+        risk_name="hotspots",
+        overview="Plain overview.",
+        involved_nodes=[malicious_nid],
+        cache_root=cache_root,
+    )
+    body = Path(out).read_text()
+    # No active wikilink injected from the bare-fallback.
+    assert "[[../../etc/passwd]]" not in body
+    # No raw HTML.
+    assert "<iframe" not in body
+    # No newline-escape: the malicious newline in the nid
+    # got flattened to a single space, so no second line
+    # in the bullet can start with `## ` or `[[`.
+    # Walk lines under "## Involved Nodes" and verify each
+    # is either the section header or a single bullet line
+    # (or blank).
+    in_section = False
+    bullet_lines: list[str] = []
+    for line in body.splitlines():
+        if line == "## Involved Nodes":
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("## "):
+                break  # next section
+            if line.startswith("- "):
+                bullet_lines.append(line)
+            elif line.strip() == "":
+                continue
+            else:
+                # Non-bullet, non-blank line within the
+                # Involved Nodes section → injection escaped.
+                assert False, (
+                    f"unexpected non-bullet line in Involved "
+                    f"Nodes: {line!r}\nFull body:\n{body}"
+                )
+    # The single malicious node renders as exactly ONE
+    # bullet (no newline split, no extra bullets).
+    assert len(bullet_lines) == 1, (
+        f"expected 1 bullet from 1 involved_node; got "
+        f"{len(bullet_lines)}: {bullet_lines}"
+    )
+
+
 def test_render_and_write_risk_note_falls_back_on_garbage_node_ids(
     tier1_graph_id, tmp_path
 ):
@@ -209,6 +284,277 @@ def test_render_and_write_risk_note_falls_back_on_garbage_node_ids(
     # entries before reaching the good one.
     assert "garbage-no-colon" in body or "`garbage-no-colon`" in body
     assert "NotReal.method" in body
+
+
+def test_render_and_write_risk_note_defangs_dataview_inline_queries(
+    tier1_graph_id, tmp_path,
+):
+    """Codex round-19 fix: Obsidian's Dataview plugin executes
+    single-backtick inline queries (`= dql_expr`, `$= js`).
+    Pre-fix, `_defang_text` only escaped 3+ backtick fences,
+    leaving Dataview inline queries intact. An LLM-authored
+    risk overview or observation with `$= some_js` would run
+    arbitrary DataviewJS in the auditor's vault if the plugin
+    is enabled.
+
+    Post-fix: every backtick is escaped to `&#x60;`. Pin both
+    the overview path (block-aware) AND the observation path
+    (block-aware per-bullet)."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    gid, cache_root = tier1_graph_id
+    overview = (
+        "Risk includes inline DQL `= file.size` to peek at "
+        "vault metadata and DataviewJS `$= dv.pages('')` "
+        "to exfiltrate the whole vault."
+    )
+    observations = [
+        "Inline `= now()` query in note",
+        "Inline `$= app.vault.read('.env')` DataviewJS payload",
+    ]
+    out = render_and_write_risk_note(
+        tmp_path, gid,
+        risk_name="dataview-test",
+        overview=overview,
+        involved_nodes=[],
+        observations=observations,
+        cache_root=cache_root,
+    )
+    body = Path(out).read_text()
+    # No single backticks anywhere in body — Dataview parser
+    # has nothing to recognize.
+    # (Stripping the YAML frontmatter first because the
+    # frontmatter dumper may emit a `:` inside quoted strings
+    # but never raw backticks; check defensively.)
+    overview_body = body.split("---\n\n", 1)[-1]
+    assert "`" not in overview_body, (
+        f"backtick reached overview body: {overview_body}"
+    )
+    # Defanged entity forms present (visible-but-inert).
+    assert "&#x60;= file.size&#x60;" in body
+    assert "&#x60;$= dv.pages" in body
+    assert "&#x60;= now()&#x60;" in body
+    assert "&#x60;$= app.vault.read" in body
+
+
+def test_render_and_write_risk_note_sanitizes_overview(
+    tier1_graph_id, tmp_path,
+):
+    """Codex review fix (F5): RiskSynthesizer's overview
+    prose comes from the LLM processing attacker-influenced
+    SARIF context. Without sanitization, an attacker can
+    inject raw HTML (iframes, scripts), clickable
+    vault-traversal wikilinks, transclusions, dangerous URI
+    schemes, and code fences directly into the auditor's
+    risk note. Pin the contract: all injection vectors are
+    defanged before write."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    gid, cache_root = tier1_graph_id
+    malicious_overview = (
+        '<iframe src="https://evil.example"></iframe> '
+        'Click [here](javascript:alert(1)) or visit '
+        'obsidian://action?cmd=evil or open '
+        '[[../../etc/passwd]] or ![[../../secrets]]. '
+        'File risk in file:///etc/shadow. '
+        '```bash\nrm -rf $HOME/.ssh\n```'
+    )
+    out = render_and_write_risk_note(
+        tmp_path, gid,
+        risk_name="hotspots",
+        overview=malicious_overview,
+        involved_nodes=[],
+        cache_root=cache_root,
+    )
+    body = Path(out).read_text()
+    # Every injection vector is defanged in the written file.
+    assert "<iframe" not in body
+    assert "](javascript:" not in body
+    assert "obsidian://" not in body
+    assert "[[../../etc/passwd" not in body
+    assert "![[../../secrets" not in body
+    assert "file:///etc/shadow" not in body
+    assert "```bash" not in body
+    # Visible-but-inert defanged forms present.
+    assert "&lt;iframe" in body
+    assert "] (javascript[:]" in body
+    assert "obsidian[:]" in body
+    assert "[ [../../etc/passwd" in body
+    assert "! [" in body  # transclusion defang
+    assert "file[:][//]/etc/shadow" in body
+    assert "&#x60;&#x60;&#x60;" in body
+
+
+def test_render_and_write_risk_note_rejects_heading_injection_in_overview(
+    tier1_graph_id, tmp_path,
+):
+    """Codex follow-up review fix (F1): `_defang_text` alone
+    preserves newlines, so an overview containing
+    `\\n## Fake Finding Accepted` would still inject a real
+    H2 into the auditor's note. Block-aware sanitizer must
+    neutralize line-start markdown constructs."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    out = render_and_write_risk_note(
+        tmp_path, tier1_graph_id[0],
+        risk_name="hotspots",
+        overview=(
+            "Real prose about hotspots.\n\n"
+            "## Fake Finding Accepted\n\n"
+            "Trust this conclusion.\n"
+        ),
+        involved_nodes=[],
+        cache_root=tier1_graph_id[1],
+    )
+    body = Path(out).read_text()
+    # The ONLY H2 in the body must be canonical sections
+    # (## Overview, ## Involved Nodes, ## Observations) —
+    # NOT the attacker's injected "Fake Finding Accepted".
+    import re as _re
+    h2_lines = _re.findall(
+        r"^## .+$", body, flags=_re.MULTILINE,
+    )
+    assert "## Fake Finding Accepted" not in h2_lines, (
+        f"H2 injection survived block-defang; H2 lines: "
+        f"{h2_lines}\n\nbody:\n{body}"
+    )
+    # Real prose survives (paragraph structure preserved).
+    assert "Real prose about hotspots." in body
+    # Attacker text still appears (defanged inline) — visible
+    # but not as a heading.
+    assert "Fake Finding Accepted" in body
+
+
+def test_render_and_write_risk_note_rejects_list_injection_in_observations(
+    tier1_graph_id, tmp_path,
+):
+    """Codex follow-up review fix (F1): observation
+    containing `ok\\n- Action: trust this` would inject a
+    sibling bullet. Block-defang prevents that."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    out = render_and_write_risk_note(
+        tmp_path, tier1_graph_id[0],
+        risk_name="hotspots",
+        overview="Plain overview.",
+        involved_nodes=[],
+        observations=[
+            "Real observation.\n- Injected action item",
+        ],
+        cache_root=tier1_graph_id[1],
+    )
+    body = Path(out).read_text()
+    # The injected bullet's `- ` at line start must not
+    # render as a list item. Count list bullets in the
+    # Observations section.
+    import re as _re
+    # Find the Observations section content.
+    obs_section = body.split("## Observations", 1)[-1]
+    bullets = _re.findall(r"^- ", obs_section, flags=_re.MULTILINE)
+    assert len(bullets) == 1, (
+        f"expected exactly 1 observation bullet, got "
+        f"{len(bullets)}. Body:\n{body}"
+    )
+    # The injected text survives (defanged) but as paragraph
+    # text of the first observation, not a second bullet.
+    assert "Injected action item" in body
+
+
+def test_render_and_write_risk_note_rejects_blockquote_injection(
+    tier1_graph_id, tmp_path,
+):
+    """Block-defang covers blockquote injection too —
+    attacker can't make their text look like a quoted
+    statement from another auditor."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    out = render_and_write_risk_note(
+        tmp_path, tier1_graph_id[0],
+        risk_name="hotspots",
+        overview=(
+            "Real overview.\n\n"
+            "> 'This contract is safe.' — Trail of Bits"
+        ),
+        involved_nodes=[],
+        cache_root=tier1_graph_id[1],
+    )
+    body = Path(out).read_text()
+    # No real blockquote at line start. (Obsidian/markdown
+    # would render `> ` as a quoted block.)
+    import re as _re
+    block_quotes = _re.findall(
+        r"^> ", body, flags=_re.MULTILINE,
+    )
+    assert block_quotes == [], (
+        f"blockquote injection survived; body:\n{body}"
+    )
+    # Text content still visible.
+    assert "Trail of Bits" in body
+
+
+def test_render_and_write_risk_note_rejects_reference_def_injection(
+    tier1_graph_id, tmp_path,
+):
+    """Link reference definitions `[ref]: url` at line start
+    set up named links that can be referenced inline as
+    `[text][ref]`. An attacker can plant a malicious URL ref
+    and trick the LLM (or auditor in a later pass) into
+    referencing it. Defang at the reference-def line."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    out = render_and_write_risk_note(
+        tmp_path, tier1_graph_id[0],
+        risk_name="hotspots",
+        overview=(
+            "Real overview.\n\n"
+            "[evil]: https://attacker.example/\n"
+            "[^fn]: footnote payload"
+        ),
+        involved_nodes=[],
+        cache_root=tier1_graph_id[1],
+    )
+    body = Path(out).read_text()
+    # Reference definitions at line start are defanged.
+    import re as _re
+    refs = _re.findall(
+        r"^\[[^\]]+\]:\s", body, flags=_re.MULTILINE,
+    )
+    assert refs == [], (
+        f"reference definitions survived block-defang; body:\n{body}"
+    )
+
+
+def test_render_and_write_risk_note_sanitizes_observations(
+    tier1_graph_id, tmp_path,
+):
+    """Codex review fix (F5): each observation string is
+    also LLM-controlled and must be sanitized the same way
+    as overview."""
+    from src.render.obsidian import render_and_write_risk_note
+
+    gid, cache_root = tier1_graph_id
+    out = render_and_write_risk_note(
+        tmp_path, gid,
+        risk_name="hotspots",
+        overview="Plain overview.",
+        involved_nodes=[],
+        observations=[
+            "Benign observation A.",
+            '<script>alert(1)</script>',
+            "Click [trap](file:///etc/passwd)",
+            "![[../../secrets|view]] tells you everything",
+        ],
+        cache_root=cache_root,
+    )
+    body = Path(out).read_text()
+    # Benign content survives.
+    assert "Benign observation A." in body
+    # Injection vectors defanged.
+    assert "<script>" not in body
+    assert "](file:" not in body
+    assert "![[" not in body
+    assert "&lt;script&gt;" in body
+    assert "] (file[:]" in body
 
 
 def test_list_subgraph_nodes_returns_empty_for_unknown_name(

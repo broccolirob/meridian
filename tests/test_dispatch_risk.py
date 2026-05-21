@@ -15,6 +15,7 @@ Validates the script-level scheduling contract:
 """
 
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -141,8 +142,16 @@ def test_dispatch_risk_synthesis_invokes_agent_once_with_task(
 def test_dispatch_risk_synthesis_returns_ok_on_success(
     monkeypatch, tmp_path,
 ):
-    """Reply text bubbles up; ok=True when the agent returns
-    cleanly. Error field is None."""
+    """ok=True when the agent returns cleanly. Error field
+    is None.
+
+    Codex round-9 fix: the reply field now contains the
+    JSON list of ACTUALLY PROMOTED files (from staging →
+    vault/risks/), NOT the LLM's reported reply. The bare
+    `_FakeAgent` doesn't write any files to its bound
+    vault, so promotion yields an empty list and reply is
+    `"[]"`. Tests that exercise the promotion path use
+    `_WritingFakeAgent` (see below)."""
     from src.agent import dispatch_risk_synthesis
 
     _patch_load_graph_with_preanalysis(monkeypatch)
@@ -153,7 +162,9 @@ def test_dispatch_risk_synthesis_returns_ok_on_success(
 
     assert result["graph_id"] == _VALID_GID
     assert result["ok"] is True
-    assert "hotspots.md" in result["reply"]
+    # No files were written by the fake agent, so nothing
+    # promoted to vault/risks/, so reply is an empty list.
+    assert result["reply"] == "[]"
     assert result["error"] is None
 
 
@@ -254,6 +265,176 @@ def test_dispatch_risk_synthesis_per_invoke_timeout_cuts_off_hang(
         f"dispatcher took {elapsed:.2f}s; timeout failed to "
         f"cut off the wedged invoke"
     )
+
+
+class _WritingFakeAgent:
+    """Stand-in agent that actually writes files to its
+    bound vault on invoke. Used to exercise the staging →
+    vault/risks/ promotion path."""
+
+    def __init__(self, vault_path, file_names: list[str]):
+        self.vault_path = Path(vault_path)
+        self.file_names = file_names
+        self.calls: list[str] = []
+
+    def invoke(self, inputs):
+        import json
+        risks_dir = self.vault_path / "risks"
+        risks_dir.mkdir(parents=True, exist_ok=True)
+        for name in self.file_names:
+            (risks_dir / name).write_text(f"content for {name}")
+        msg = inputs["messages"][0]["content"]
+        self.calls.append(msg)
+        reply = MagicMock()
+        # LLM reports the staging paths it wrote to. The
+        # dispatcher OVERRIDES this with actual promoted
+        # paths regardless of what the LLM says.
+        reply.content = json.dumps([
+            str(risks_dir / name) for name in self.file_names
+        ])
+        return {"messages": [reply]}
+
+
+def test_dispatch_risk_synthesis_binds_agent_to_staging_not_vault(
+    monkeypatch, tmp_path,
+):
+    """Codex round-9 fix: dispatcher binds the agent to
+    `<vault>/.audit/risk-staging/<run_id>/` instead of the
+    real vault. Late-running workers (post-timeout) can
+    only write to staging, never to vault/risks/.
+
+    Pin the binding: build_agent receives the staging
+    path, not the vault path."""
+    from src.agent import dispatch_risk_synthesis
+
+    _patch_load_graph_with_preanalysis(monkeypatch)
+    captured = {}
+
+    def capture_build_agent(graph_id, vault_path, **kwargs):
+        captured["vault_path"] = str(vault_path)
+        return _FakeAgent()
+
+    monkeypatch.setattr(
+        "src.agent.build_agent", capture_build_agent
+    )
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    dispatch_risk_synthesis(_VALID_GID, str(vault))
+
+    # Agent received staging path, NOT the vault itself.
+    assert ".audit/risk-staging/" in captured["vault_path"]
+    assert str(vault.resolve()) in captured["vault_path"]
+    # The vault path itself was NOT used as the agent's
+    # vault (staging is a SUBdir of vault).
+    assert captured["vault_path"] != str(vault.resolve())
+
+
+def test_dispatch_risk_synthesis_leaves_files_in_staging(
+    monkeypatch, tmp_path,
+):
+    """Codex round-10 fix: dispatcher no longer promotes
+    staging → vault/risks/. Files written by the agent
+    REMAIN in staging; the caller is responsible for
+    verification + promotion. Reply contains staging paths
+    + result includes `staging_root` for the caller to
+    inspect and (after promotion or rejection) clean up."""
+    import json
+    from src.agent import dispatch_risk_synthesis
+
+    _patch_load_graph_with_preanalysis(monkeypatch)
+
+    expected_names = [
+        "hotspots.md",
+        "delegatecall-sites.md",
+        "reentrancy-candidates.md",
+    ]
+
+    def make_writing_agent(graph_id, vault_path, **kwargs):
+        return _WritingFakeAgent(vault_path, expected_names)
+
+    monkeypatch.setattr(
+        "src.agent.build_agent", make_writing_agent
+    )
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    result = dispatch_risk_synthesis(_VALID_GID, str(vault))
+
+    assert result["ok"] is True
+    # Files are in STAGING, NOT in vault/risks/.
+    vault_risks = vault / "risks"
+    assert not vault_risks.exists() or not list(vault_risks.glob("*.md")), (
+        "dispatcher must NOT promote to vault/risks/ "
+        "(caller's responsibility)"
+    )
+    # Staging metadata returned for the caller.
+    staging_root = Path(result["staging_root"])
+    assert staging_root.is_dir()
+    staging_risks = staging_root / "risks"
+    for name in expected_names:
+        assert (staging_risks / name).is_file(), (
+            f"expected staged {name} in {staging_risks}"
+        )
+    # Reply is JSON list of STAGING paths.
+    staged_paths = json.loads(result["reply"])
+    assert len(staged_paths) == 3
+    for p in staged_paths:
+        resolved = Path(p).resolve()
+        assert resolved.is_relative_to(staging_risks.resolve())
+
+
+def test_dispatch_risk_synthesis_isolates_late_writes_on_failure(
+    monkeypatch, tmp_path,
+):
+    """Codex round-9 fix: on agent.invoke failure, NOTHING
+    is promoted. The vault stays clean. A late-running
+    worker (simulated here by post-dispatch writes via the
+    captured staging path) can only reach staging, never
+    vault/risks/."""
+    from src.agent import dispatch_risk_synthesis
+
+    _patch_load_graph_with_preanalysis(monkeypatch)
+    captured_staging = {}
+
+    def capture_then_fail(graph_id, vault_path, **kwargs):
+        captured_staging["path"] = Path(vault_path)
+        return _FakeAgent(
+            raise_on_invoke=RuntimeError("simulated"),
+        )
+
+    monkeypatch.setattr(
+        "src.agent.build_agent", capture_then_fail
+    )
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    result = dispatch_risk_synthesis(_VALID_GID, str(vault))
+
+    assert result["ok"] is False
+    # vault/risks/ is empty (no promotion on failure).
+    vault_risks = vault / "risks"
+    if vault_risks.exists():
+        assert list(vault_risks.glob("*.md")) == [], (
+            "late write reached vault/risks/ on failure — "
+            "staging isolation broken"
+        )
+    # Simulate a late worker writing AFTER dispatch returned.
+    # In reality, the bound closure writes to staging via
+    # render_and_write_risk_note. Here we simulate by
+    # recreating staging and writing directly. The vault
+    # remains clean.
+    staging_risks = captured_staging["path"] / "risks"
+    staging_risks.mkdir(parents=True, exist_ok=True)
+    (staging_risks / "hotspots.md").write_text(
+        "late attacker-controlled content"
+    )
+    # vault/risks/ STILL empty after the late write.
+    if vault_risks.exists():
+        assert list(vault_risks.glob("*.md")) == [], (
+            "late write reached vault/risks/ — staging "
+            "isolation broken"
+        )
 
 
 def test_dispatch_risk_synthesis_rejects_nonpositive_timeout(

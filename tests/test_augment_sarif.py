@@ -53,8 +53,20 @@ def fresh_tier1_with_sarif(tmp_path, monkeypatch):
     pollution of fixture, no shared state across tests.
 
     SOLC_VERSION scopes solc selection to slither's subprocess
-    only (no mutation of ~/.solc-select/global-version)."""
+    only (no mutation of ~/.solc-select/global-version).
+
+    Bypasses build_analyzer_env's HOME isolation so slither's
+    subprocess can reach ~/.solc-select/artifacts/ — see the
+    same note on test_run_slither_on_tier1_... in
+    tests/test_slither.py for the rationale. Production runs
+    MUST get the isolated env; this is a TEST-ONLY escape
+    hatch."""
     monkeypatch.setenv("SOLC_VERSION", "0.5.16")
+    import os
+    monkeypatch.setattr(
+        "src.analyzers.slither.build_analyzer_env",
+        lambda **_kw: os.environ.copy(),
+    )
     repo = tmp_path / "tier1"
     shutil.copytree(TIER1_FIXTURE, repo)
     cache_root = tmp_path / "cache"

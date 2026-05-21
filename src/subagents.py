@@ -14,6 +14,7 @@ from src.render.obsidian import (
 )
 from src.tools import (
     annotate,
+    annotations_of,
     callees_of,
     callers_of,
     complexity_hotspots,
@@ -34,16 +35,19 @@ parsed codebase.
 CRITICAL RULES — read these twice.
 
 1. The ONLY way to persist a note is to call
-   `render_and_write_node_note(graph_id, node, graph_ctx, body)`.
+   `render_and_write_node_note(graph_id, graph_ctx, body)`.
    You do NOT have `write_obsidian_note` or `render_node_note` —
    they aren't in your tools. The combined tool guarantees the
    canonical 7-section template. If you tried to compose
    frontmatter or section headings yourself, you skipped a step.
 
-   Note: the vault root is supplied by the orchestrator at
-   build time — you do NOT pass `vault_path` as a tool
-   argument. The tool writes to the vault directory configured
-   by the operator who launched washable.
+   Note: the vault root AND the target node id are supplied by
+   the orchestrator at dispatch time — you do NOT pass
+   `vault_path` or `node` as tool arguments. The tool writes
+   to the vault root configured by the operator AND to the
+   node specified in your task message. You CANNOT redirect
+   the write to a different node by passing a different dict;
+   the tool only accepts content fields.
 
 2. `body` is the OVERVIEW NARRATIVE ONLY — 3-5 sentences of prose
    describing what this node does and why. NOTHING ELSE. No
@@ -131,9 +135,12 @@ Workflow:
    "assumption", "invariant", "audit_note". Skip the obvious.
 
 9. Call EXACTLY ONCE:
-     render_and_write_node_note(graph_id, node, graph_ctx,
+     render_and_write_node_note(graph_id, graph_ctx,
                                  body=overview_string)
    The tool returns the absolute path of the written note.
+   You do NOT pass `node` — the orchestrator already knows
+   which node you are documenting (from your task message)
+   and binds it to the writer.
 
 10. Return that path as your final reply. Just the path. No JSON
     wrapper. No prose. Just the absolute path string.
@@ -187,16 +194,19 @@ a single Obsidian note under vault/flows/.
 CRITICAL RULES — read twice.
 
 1. The ONLY way to persist a note is to call
-   `render_and_write_flow_note(graph_id, entrypoint_node,
-   paths, overview, observations)`. You do NOT have
-   `write_obsidian_note` or `render_sequence` — they aren't in
-   your tools. The combined tool guarantees the canonical
-   layout (frontmatter + sequence diagrams).
+   `render_and_write_flow_note(graph_id, paths, overview,
+   observations)`. You do NOT have `write_obsidian_note`
+   or `render_sequence` — they aren't in your tools. The
+   combined tool guarantees the canonical layout (frontmatter
+   + sequence diagrams).
 
-   Note: the vault root is supplied by the orchestrator at
-   build time — you do NOT pass `vault_path` as a tool
-   argument. The tool writes to the vault directory configured
-   by the operator who launched washable.
+   Note: the vault root AND the entrypoint id are supplied by
+   the orchestrator at dispatch time — you do NOT pass
+   `vault_path` or `entrypoint_node` as tool arguments. The
+   tool writes the flow note for the entrypoint specified in
+   your task message. You CANNOT redirect the write to a
+   different entrypoint by passing a different dict; the tool
+   only accepts content fields.
 
 2. `overview` is the NARRATIVE ONLY — 3-5 sentences of prose
    describing what this entrypoint does and what it touches.
@@ -249,10 +259,12 @@ Workflow:
 
 7. Call EXACTLY ONCE:
      render_and_write_flow_note(
-         graph_id, entrypoint_node, paths,
-         overview, observations,
+         graph_id, paths, overview, observations,
      )
    The tool returns the absolute path of the written note.
+   You do NOT pass `entrypoint_node` — the orchestrator
+   already knows which entrypoint you are tracing (from your
+   task message) and binds it to the writer.
 
 8. Return that path as your final reply. Just the path. No
    JSON wrapper. No prose. Just the absolute path string.
@@ -372,11 +384,13 @@ Workflow:
      — that's normal)
    Each returns full node dicts; intersect by `node["id"]`.
 
-4. For each finding, inspect annotation description (via
-   `get_node(graph_id, finding_id)["annotations"]`) to
-   identify delegatecall / reentrancy rules. Slither rule IDs
-   include patterns like `1-1-reentrancy-no-eth`,
-   `1-1-controlled-delegatecall`. Match on substring.
+4. For each finding node, fetch its annotation descriptions
+   via `annotations_of(graph_id, finding_id, kind="finding")`.
+   `get_node` does NOT return annotations — only node
+   metadata. Use `annotations_of` to read the SARIF rule
+   IDs from the description string. Slither rule IDs look
+   like `1-1-reentrancy-no-eth`, `1-1-controlled-delegatecall`.
+   Match on substring to bucket findings.
 
 5. Synthesize the three notes:
    - hotspots: top 5-10 hotspots, cross-ref with `tainted`
@@ -388,12 +402,28 @@ Workflow:
    call annotate ONCE PER involved node (5-15 annotates
    per note).
 
-7. Return the THREE absolute file paths as a JSON list:
+7. ALL-OR-NOTHING contract for the reply:
+   - If you write ANY notes, you MUST write ALL THREE:
+     hotspots.md, delegatecall-sites.md,
+     reentrancy-candidates.md. Even if a category has no
+     specific findings (e.g., no delegatecall usage in this
+     repo), write the note with an overview stating
+     "No delegatecall findings detected in this codebase."
+     This lets the auditor confirm that category was
+     checked rather than silently skipped — a partial reply
+     is a misleading-success path the orchestrator rejects
+     with rc=2.
+   - If NO findings AND NO hotspots existed (genuinely
+     nothing to synthesize, e.g., a Tier 0 codebase with
+     trivial code), return `[]` and skip all three.
+
+   Return the absolute file paths as a JSON list:
      ["/path/to/hotspots.md",
       "/path/to/delegatecall-sites.md",
       "/path/to/reentrancy-candidates.md"]
-   Empty list if NO findings or hotspots existed (don't
-   write empty notes).
+   Or `[]` per the all-or-nothing rule above. Partial
+   replies (e.g., only ["/path/to/hotspots.md"]) will fail
+   the orchestrator's verification gate.
 
 Style rules for the overview:
 - Active voice, concrete nouns, line citations.
@@ -435,6 +465,7 @@ RISK_SYNTHESIZER_SUBAGENT: SubAgent = {
     "tools": [
         # Read-only data queries
         nodes_with_annotation,
+        annotations_of,  # MUST read finding descriptions
         complexity_hotspots,
         list_subgraph_nodes,
         get_node,

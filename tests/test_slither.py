@@ -55,6 +55,19 @@ def _solc_516_available() -> bool:
 def test_run_slither_on_tier1_produces_sarif_with_findings(
     monkeypatch, tmp_path
 ):
+    # Bypass build_analyzer_env's HOME isolation for THIS
+    # integration test only. The Codex follow-up review
+    # removed the .solc-select symlink (it leaked real HOME
+    # via readlink), so the isolated temp HOME can't reach
+    # ~/.solc-select/artifacts/. Real production runs MUST
+    # get the isolated env; this monkeypatch is a TEST-ONLY
+    # escape hatch for verifying slither's end-to-end
+    # behavior against a TRUSTED fixture (Tier 1).
+    import os
+    monkeypatch.setattr(
+        "src.analyzers.slither.build_analyzer_env",
+        lambda **_kw: os.environ.copy(),
+    )
     """Chunk 4.1 success criterion: running slither on Tier 1
     produces a valid SARIF file with at least one finding.
 
@@ -199,3 +212,233 @@ def test_run_slither_propagates_timeout(monkeypatch, tmp_path):
 
     with pytest.raises(subprocess.TimeoutExpired):
         run_slither(tmp_path, tmp_path / "out.sarif", timeout=0.001)
+
+
+def test_run_slither_rejects_repo_local_binary(monkeypatch, tmp_path):
+    """Codex round-12 fix: if PATH has been poisoned with
+    an entry inside the attacker repo, `shutil.which()`
+    returns an attacker binary. The wrapper must refuse to
+    execute it BEFORE subprocess.run runs. Pin via a fake
+    `slither` placed inside the repo; `shutil.which` is
+    monkeypatched to return that path."""
+    attacker_repo = tmp_path / "attacker-repo"
+    attacker_repo.mkdir()
+    fake_slither = attacker_repo / "slither"
+    fake_slither.write_text("#!/bin/sh\ntouch /tmp/PWNED\n")
+    fake_slither.chmod(0o755)
+
+    monkeypatch.setattr(
+        "src.analyzers.slither.shutil.which",
+        lambda _: str(fake_slither),
+    )
+
+    # subprocess.run must NEVER be called — the rejection
+    # happens before that. Set up a sentinel that would
+    # fire if subprocess.run executed.
+    def _fail_if_called(*a, **k):
+        raise AssertionError(
+            "subprocess.run was called — rejection failed"
+        )
+    monkeypatch.setattr(
+        "src.analyzers.slither.subprocess.run",
+        _fail_if_called,
+    )
+
+    with pytest.raises(ValueError, match="refusing to execute"):
+        run_slither(attacker_repo, tmp_path / "out.sarif")
+
+    # Sentinel file should NOT exist (subprocess never ran).
+    assert not Path("/tmp/PWNED").exists()
+
+
+def test_run_slither_argv_uses_dash_dash_separator(
+    monkeypatch, tmp_path,
+):
+    """Codex follow-up review fix (F3): the positional repo
+    path must come AFTER a `--` separator so a path starting
+    with `-` cannot be parsed as a slither flag. Mirrors the
+    semgrep wrapper. Pin the argv shape."""
+    captured: dict = {}
+
+    def fake_run(*args, **kwargs):
+        captured["argv"] = list(args[0])
+        out = tmp_path / "out.sarif"
+        out.write_text('{"runs": []}')
+        return subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(
+        "src.analyzers.slither.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(
+        "src.analyzers.slither.shutil.which",
+        lambda _: "/fake/slither",
+    )
+
+    run_slither(tmp_path, tmp_path / "out.sarif")
+
+    argv = captured["argv"]
+    # `--` must appear in argv and the target arg must be
+    # AFTER it. (Slither's first positional arg is the
+    # target; the `--` defends against `-`-prefixed paths.)
+    assert "--" in argv, (
+        f"argv missing `--` separator: {argv}"
+    )
+    sep_idx = argv.index("--")
+    target_idx = len(argv) - 1
+    assert target_idx > sep_idx, (
+        f"target must come after `--`; argv={argv}"
+    )
+
+
+def test_run_slither_passes_trusted_empty_config_file(
+    monkeypatch, tmp_path,
+):
+    """Codex round-19 fix: pin the argv shape — slither must
+    be invoked with `--config-file <trusted>` where the path
+    points OUTSIDE the repo. Without this, slither defaults
+    to reading `slither.config.json` from cwd (= the repo),
+    which lets a malicious repo control output destinations
+    (`{"json": "/abs/exfil.json"}`) and detector options."""
+    captured: dict = {}
+
+    def fake_run(*args, **kwargs):
+        argv = list(args[0])
+        captured["argv"] = argv
+        # Capture the config-file contents at subprocess time
+        # so the test can assert it's `{}` (no inherited
+        # detector overrides).
+        cfg_idx = argv.index("--config-file")
+        captured["config_path"] = argv[cfg_idx + 1]
+        captured["config_contents"] = Path(
+            argv[cfg_idx + 1]
+        ).read_text()
+        out_idx = argv.index("--sarif")
+        Path(argv[out_idx + 1]).write_text('{"runs": []}')
+        return subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(
+        "src.analyzers.slither.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(
+        "src.analyzers.slither.shutil.which",
+        lambda _: "/fake/slither",
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_slither(repo, tmp_path / "out.sarif")
+
+    argv = captured["argv"]
+    # --config-file must appear and point at a file OUTSIDE
+    # the repo (so a malicious repo-local slither.config.json
+    # is not consulted).
+    assert "--config-file" in argv, (
+        f"missing --config-file: {argv}"
+    )
+    cfg_path = Path(captured["config_path"])
+    assert not cfg_path.is_relative_to(repo.resolve()), (
+        f"trusted config must live outside the repo: {cfg_path}"
+    )
+    # Contents must be empty JSON (no inherited settings).
+    assert captured["config_contents"].strip() == "{}", (
+        f"trusted config must be empty: "
+        f"{captured['config_contents']!r}"
+    )
+    # And the trusted file is cleaned up after the run
+    # (no /tmp litter).
+    assert not cfg_path.exists(), (
+        f"trusted config should have been unlinked: {cfg_path}"
+    )
+
+
+def test_run_slither_ignores_repo_local_config_file(
+    monkeypatch, tmp_path,
+):
+    """Codex round-19 repro: end-to-end pin that a malicious
+    `slither.config.json` in the repo does NOT take effect.
+    Uses a fake subprocess.run that asserts the trusted
+    `--config-file <outside-tmp>` is passed AND that argv
+    does NOT contain the repo-local path."""
+    repo = tmp_path / "attacker-repo"
+    repo.mkdir()
+    # Attacker drops a malicious config trying to write an
+    # extra JSON report at /tmp/exfil.json.
+    exfil_path = "/tmp/washable-slither-exfil-test.json"
+    (repo / "slither.config.json").write_text(
+        f'{{"json": "{exfil_path}"}}'
+    )
+
+    def fake_run(*args, **kwargs):
+        argv = list(args[0])
+        # The trusted config must be passed; the repo-local
+        # one must NOT be referenced anywhere in argv.
+        assert "--config-file" in argv, argv
+        cfg_path = argv[argv.index("--config-file") + 1]
+        assert not Path(cfg_path).is_relative_to(repo.resolve()), (
+            f"argv refers to a repo-local config: {cfg_path}"
+        )
+        # Confirm slither was NOT pointed at the attacker's
+        # config (would have to be either via --config-file or
+        # via cwd default lookup; cwd is the repo so the
+        # presence of the trusted --config-file is what
+        # OVERRIDES the cwd default).
+        out_idx = argv.index("--sarif")
+        Path(argv[out_idx + 1]).write_text('{"runs": []}')
+        return subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr="",
+        )
+
+    monkeypatch.setattr(
+        "src.analyzers.slither.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(
+        "src.analyzers.slither.shutil.which",
+        lambda _: "/fake/slither",
+    )
+
+    run_slither(repo, tmp_path / "out.sarif")
+
+    # The exfil file must NOT have been created — the trusted
+    # config has no `json` key, so slither shouldn't write
+    # anywhere beyond --sarif <out>.
+    assert not Path(exfil_path).exists(), (
+        f"exfil file got written: {exfil_path}"
+    )
+
+
+def test_run_slither_unlinks_partial_sarif_on_timeout(
+    monkeypatch, tmp_path,
+):
+    """Mirrors run_semgrep's timeout-cleanup behavior. If
+    slither times out mid-write, the partial SARIF is
+    unlinked so a retry starts clean and downstream
+    `augment_sarif` can't ingest stale partial JSON."""
+    out = tmp_path / "partial.sarif"
+
+    def fake_run(*args, **kwargs):
+        # Simulate slither writing a partial SARIF then
+        # hitting the timeout.
+        out.write_text("partial")
+        raise subprocess.TimeoutExpired(
+            cmd=args[0], timeout=kwargs.get("timeout", 0)
+        )
+
+    monkeypatch.setattr(
+        "src.analyzers.slither.subprocess.run", fake_run
+    )
+    monkeypatch.setattr(
+        "src.analyzers.slither.shutil.which",
+        lambda _: "/fake/slither",
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_slither(tmp_path, out, timeout=0.001)
+
+    assert not out.exists(), (
+        f"partial SARIF must be unlinked after timeout; "
+        f"contents: {out.read_text() if out.exists() else 'unlinked'}"
+    )

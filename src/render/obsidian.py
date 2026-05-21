@@ -19,7 +19,13 @@ from src.render.mermaid import (
     render_inheritance,
     render_sequence,
 )
-from src.tools import annotations_of, get_node, list_nodes
+from src.tools import (
+    annotations_of,
+    callees_of,
+    get_node,
+    list_nodes,
+    nodes_with_annotation,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -125,6 +131,44 @@ def write_obsidian_note(
     pattern in `src/graph/persist.py::save_graph`.
     """
     vault = Path(vault_path)
+
+    # Codex round-16 fix: reject any `..` traversal segment
+    # under POSIX or Windows separators BEFORE the resolve-
+    # based containment check.
+    #
+    # Why the resolve check alone is insufficient: a
+    # `rel_path="contracts/../risks/pwn.md"` resolves to
+    # `vault/risks/pwn.md`, which IS inside the vault, so
+    # `relative_to(vault)` succeeds. The route was meant to
+    # be `vault/contracts/<bare>.md` — the traversal jumped
+    # the kind-routed folder and gave the caller an in-vault
+    # arbitrary-write primitive (it could clobber a curated
+    # risk note, a flow note, or a MOC). The repro: an
+    # LLM-forged `node["name"]="../risks/node-pwn"` flows
+    # through `_disambiguated_path` → rel_path
+    # `contracts/../risks/node-pwn.md`. The refetch defense
+    # in `render_and_write_node_note` / `render_and_write_flow_note`
+    # is the primary fix; this is the catch-all so any future
+    # caller that bypasses refetch still can't traverse.
+    #
+    # Split on BOTH POSIX `/` and Windows `\` because Python
+    # on macOS/Linux normally normalizes `\` as a literal
+    # character, but Obsidian vaults can live on Windows
+    # filesystems via SMB/mount, and `Path.parts` does NOT
+    # split on `\` on POSIX. So we check both explicitly.
+    rel_parts = rel_path.replace("\\", "/").split("/")
+    if ".." in rel_parts:
+        raise ValueError(
+            f"rel_path contains traversal segment: {rel_path!r}"
+        )
+    # Absolute paths also break the vault-rooted contract.
+    if rel_path.startswith(("/", "\\")) or (
+        len(rel_path) >= 2 and rel_path[1] == ":"
+    ):
+        raise ValueError(
+            f"rel_path must be relative to vault: {rel_path!r}"
+        )
+
     target = vault / rel_path
     try:
         target.resolve().relative_to(vault.resolve())
@@ -325,15 +369,29 @@ def _bare_name_from_wikilink(wikilink: str) -> str:
 
 
 def _render_overview(body: str) -> str:
+    """Render the Overview section.
+
+    `body` is LLM-authored prose from attacker-influenced
+    Solidity context. Apply `_defang_block_text` here so
+    every caller (node notes, flow notes, risk notes) gets
+    the same markdown-injection defense without remembering
+    to pre-defang. Block-aware: preserves paragraph
+    structure (3-5 sentence overviews stay readable) but
+    neutralizes line-start headings/lists/blockquotes/
+    reference defs AND inline HTML/wikilinks/URI schemes/
+    code fences (Codex round-13 fix)."""
     if body.strip():
-        return f"## Overview\n\n{body.rstrip()}\n"
+        safe = _defang_block_text(body)
+        return f"## Overview\n\n{safe.rstrip()}\n"
     return "## Overview\n\n_Overview not yet written._\n"
 
 
 def _render_link_list(items: list[str], empty_msg: str) -> str:
     if not items:
         return f"{empty_msg}\n"
-    return "".join(f"- {item}\n" for item in items)
+    return "".join(
+        f"- {_defang_link_list_item(item)}\n" for item in items
+    )
 
 
 def _render_graph_context(graph_ctx: dict[str, Any]) -> str:
@@ -399,20 +457,36 @@ def _render_functions(graph_ctx: dict[str, Any]) -> str:
             out.append("_None._\n")
             continue
         for fn in bucket:
-            wikilink = fn.get("wikilink") or fn.get("name", "?")
+            # LLM-authored fields (wikilink/signature/docstring)
+            # are defanged at the renderer boundary — same
+            # markdown-injection defenses applied to overview /
+            # observations / annotations (round-13 fix) extend
+            # here. `name` fallback is Trailmark-derived
+            # (Solidity identifier), still flattened defensively
+            # for one-line bullet shape.
+            raw_link = fn.get("wikilink") or fn.get("name", "?")
+            wikilink = _defang_link_list_item(raw_link)
             signature = fn.get("signature", "")
             cc = fn.get("cyclomatic_complexity")
             callers_n = fn.get("callers_count", 0)
             callees_n = fn.get("callees_count", 0)
             doc = fn.get("docstring")
-            sig_part = f" `{signature}`" if signature else ""
+            sig_part = (
+                f" `{_defang_inline_code_text(signature)}`"
+                if signature else ""
+            )
             cc_part = f" — complexity {cc}" if cc is not None else ""
             out.append(
                 f"- {wikilink}{sig_part}{cc_part} "
                 f"(callers: {callers_n}, callees: {callees_n})\n"
             )
             if doc:
-                first_line = doc.strip().splitlines()[0]
+                # First-line italic prose — flatten so multi-
+                # line docstrings can't escape the italic span
+                # and inject a heading/list on a fresh line.
+                first_line = _flatten_to_one_line(
+                    doc.strip().splitlines()[0]
+                )
                 out.append(f"  - _{first_line}_\n")
     return "".join(out)
 
@@ -442,9 +516,13 @@ def _render_annotations(graph_ctx: dict[str, Any]) -> str:
         return "## Annotations\n\n_No annotations yet._\n"
     out = ["## Annotations\n\n"]
     for a in annotations:
-        kind = a.get("kind", "note")
-        source = a.get("source", "")
-        desc = a.get("description", "")
+        # All three fields are LLM-authored — defang inline
+        # (single-line bullet body) to neutralize embedded
+        # newlines, headings, wikilinks, raw HTML, and URI
+        # schemes (Codex round-13 fix).
+        kind = _flatten_to_one_line(a.get("kind", "note"))
+        source = _flatten_to_one_line(a.get("source", ""))
+        desc = _flatten_to_one_line(a.get("description", ""))
         src_part = f" _(via {source})_" if source else ""
         out.append(f"- **{kind}**: {desc}{src_part}\n")
     return "".join(out)
@@ -482,30 +560,223 @@ _RISK_SYNTHESIZER_SOURCE = "risk-synthesizer"
 _RISK_PREFIX_RE = re.compile(r"^\[([a-z0-9]+(?:-[a-z0-9]+)*)\]\s+(.+)$")
 
 
+# Schemes that don't use `://` and need explicit defang
+# (URI auto-linking + click-handling in Obsidian/browsers).
+# `javascript:`, `data:`, `file:`, `obsidian:` are the
+# obvious dangerous ones; `vbscript:`/`about:`/`chrome:`
+# round out the historical attack surface.
+_DANGEROUS_BARE_SCHEMES_RE = re.compile(
+    r"(?i)\b(javascript|data|file|obsidian|vbscript|about|chrome)\s*:"
+)
+
+# Strict shape produced by `resolve_wikilink`:
+#   [[<folder>/<name-or-module.name>|<display>]]
+# Folder names + node names + the display label are derived
+# from Trailmark-parsed identifiers (Solidity names) +
+# constants from `KIND_TO_FOLDER`. The path component can
+# contain `/` (folder separator) and `.` (module qualifier
+# for collision-disambiguated paths). The display label can
+# contain `.` (method qualifier, e.g. `Pair.swap`).
+#
+# Used by `_defang_link_list_item` + `_defang_function_wikilink`
+# to whitelist legitimate wikilinks while defanging anything
+# LLM-authored that doesn't match — e.g. `[[../../etc/passwd]]`,
+# `[[name]] ## INJECTED`, or `[[a|b]]<iframe>x</iframe>`. The
+# anchors `^`/`$` are critical: a string like `[[ok|ok]] junk`
+# must NOT match.
+_SAFE_WIKILINK_RE = re.compile(
+    r"^\[\[[A-Za-z0-9_./\-]{1,200}"
+    r"(?:\|[A-Za-z0-9_.\-]{1,200})?\]\]$"
+)
+
+
+def _defang_text(s: str) -> str:
+    """Defang attacker-controlled finding/risk-note text
+    against markdown + HTML + Obsidian-specific injection.
+
+    Defenses applied (order matters: HTML-escape FIRST so
+    later substitutions don't get re-escaped):
+
+    1. HTML escape `&`, `<`, `>`. Obsidian renders inline
+       HTML by default — raw `<iframe src="https://evil">`
+       or `<a href="file:///etc/passwd">` would be a
+       clickable/embeddable threat. Escaping makes the tags
+       render as literal text.
+
+    2. Defang Obsidian transclusion `![[..]]` (which would
+       embed the linked file inline — useful for an attacker
+       referencing `![[../../secrets]]`).
+
+    3. Defang Obsidian wikilink `[[..]]` (vault-traversal,
+       e.g. `[[../../etc/passwd]]`).
+
+    4. Defang markdown link `](` (breaks `[trusted text]
+       (file://evil)` shape).
+
+    5. Defang the `://` URL-scheme marker so bare URLs don't
+       auto-link to attacker-chosen targets.
+
+    6. Defang dangerous schemes that don't use `://`
+       (`javascript:`, `data:`, `file:`, `obsidian:` etc).
+
+    7. Defang ALL backticks (single + fenced) to HTML-entity
+       backticks. Beyond the 3+ fenced-code attack, single
+       backticks invoke Obsidian Dataview inline queries if
+       that plugin is enabled (Codex round-19 finding):
+         `= some_dql_expression`
+         `$= some_dataviewjs_expression`
+       Dataview EXECUTES the contents. An attacker-controlled
+       risk overview / observation / finding description with
+       a single-backtick payload would run arbitrary Dataview
+       JavaScript in the auditor's vault. Escaping every
+       backtick neutralizes both fenced code AND inline
+       queries. Trade-off: legitimate LLM prose that includes
+       ``inline code`` (e.g., function names in backticks)
+       renders as literal backtick characters instead of
+       styled inline code. The trade is worth it — auditor
+       prose readability is preserved enough, and the
+       executable-Dataview surface is non-negotiable.
+
+    Preserves newlines and other formatting — for inline use
+    (bullet bodies), compose with `_flatten_to_one_line`."""
+    # 1. HTML entities. Must precede every other substitution
+    # because we introduce `&` characters below (e.g.,
+    # `&#x60;` for backtick defang).
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    s = s.replace(">", "&gt;")
+    # 2-4. Obsidian/markdown link syntax. Order: transclusion
+    # before wikilink (else `![` then `[[` would partially
+    # match `![[`).
+    s = s.replace("![", "! [")
+    s = s.replace("[[", "[ [")
+    s = s.replace("](", "] (")
+    # 5. Bare URLs. `://` defang breaks http(s), ftp, etc.
+    s = s.replace("://", ":[//]")
+    # 6. Dangerous bare-colon schemes.
+    s = _DANGEROUS_BARE_SCHEMES_RE.sub(r"\1[:]", s)
+    # 7. ALL backticks (single + fenced) → HTML-entity
+    # backticks. Covers Obsidian Dataview inline queries
+    # (`= ...`, `$= ...`) as well as 3+ code fences. The
+    # plain `.replace` is correct — entity replacement
+    # preserves visible length, no overlap concerns.
+    s = s.replace("`", "&#x60;")
+    return s
+
+
 def _flatten_to_one_line(s: str) -> str:
-    """Defang attacker-controlled finding description text.
+    """Defang attacker-controlled text AND collapse to a
+    single line. For inline use (bullet bodies). Calls
+    `_defang_text` after whitespace flatten. Newlines in the
+    input become single spaces — preserves the no-extra-
+    bullets / no-header-injection contract from chunk 4.7."""
+    return _defang_text(" ".join(s.split()))
 
-    Two transformations:
 
-    1. Collapse all whitespace runs (newlines, tabs, repeated
-       spaces) to a single space and strip. Prevents
-       structural injection: an attacker who controls a
-       Solidity comment can steer the LLM to emit
-       descriptions containing `\\n- [[../evil]]` (extra
-       bullet) or `\\n## Fake heading` (header injection).
-       Flattening forces every description into one bullet's
-       worth of inline text — markdown can no longer
-       interpret it as structure.
+def _defang_inline_code_text(s: str) -> str:
+    """Defang text destined for an INLINE CODE SPAN
+    (between backticks like `` `text` ``). Extends
+    `_flatten_to_one_line` by also escaping single
+    backticks so embedded backticks in the input don't
+    close the wrapping span early.
 
-    2. Defang inline link syntax so attacker-chosen
-       targets don't render as clickable links. `[[`→`[ [`
-       breaks Obsidian wikilinks (vault-traversal attacks
-       like `[[../../etc/passwd]]`); `](`→`] (` breaks
-       markdown link syntax `[trusted text](http://evil)`.
-       The visible text survives (auditor sees what was
-       attempted) but the link is inert."""
-    flat = " ".join(s.split())
-    return flat.replace("[[", "[ [").replace("](", "] (")
+    Without this, an LLM-controlled label like
+    `foo` `` ` `` `## Injected\\n[[evil]]` rendered as
+    `` ` ``foo`` ` `` (closed code span) + `## Injected`
+    (mid-bullet text, possibly heading at line start) +
+    `[[evil]]` (active wikilink). The escape `&#x60;`
+    renders as a visible backtick character but is NOT
+    interpreted by the parser as a code-span delimiter.
+
+    Used by `render_and_write_flow_note` (hop fallback)
+    and `render_and_write_risk_note` (involved-node
+    fallback)."""
+    return _flatten_to_one_line(s).replace("`", "&#x60;")
+
+
+def _defang_link_list_item(item: str) -> str:
+    """Whitelist legitimate `resolve_wikilink`-shape strings;
+    defang everything else.
+
+    `graph_ctx["inherits" | "implements" | "uses" | "callers"
+    | "callees"]` is LLM-authored — NodeDocumenter calls
+    `resolve_wikilink` to produce these strings, but a
+    prompt-injected NodeDocumenter could emit raw markdown
+    (`## INJECTED`), vault-escape wikilinks
+    (`[[../../etc/passwd]]`), raw HTML (`<iframe>`), or
+    trailing garbage after a legitimate-looking prefix
+    (`[[ok|ok]]\\n## Pwned`).
+
+    Strategy: match the exact shape `_SAFE_WIKILINK_RE`
+    produces AND reject any `..` sequence (vault-traversal —
+    `.` and `/` are in the char class for legitimate dotted
+    module paths like `contracts.A.Vault`, but legitimate
+    paths never contain consecutive dots). Pass through
+    unchanged on match, otherwise `_flatten_to_one_line`
+    (HTML escape + scheme/wikilink/code-fence defang +
+    collapse to one line so multi-line injection can't
+    reach the next bullet)."""
+    if _SAFE_WIKILINK_RE.match(item) and ".." not in item:
+        return item
+    return _flatten_to_one_line(item)
+
+
+# Zero-width space — invisible to the auditor reading the
+# rendered note, but breaks markdown block-level parsing
+# when prepended to a line. Used by `_defang_block_text` to
+# neutralize line-start injection (headings, lists,
+# blockquotes, reference definitions, setext underlines, HRs)
+# without disrupting the visible paragraph structure.
+_ZWSP = "​"
+
+# Line-start markdown block constructs. Anchored at line
+# start with `re.MULTILINE` so each line is checked
+# independently. Matches the leading whitespace separately
+# to preserve indent on re-insertion.
+_BLOCK_START_RE = re.compile(
+    r"(?m)^(\s*)("
+    r"#{1,6}\s"                # ATX headings (`# `..`###### `)
+    r"|[-*+]\s"                # unordered list (`- `, `* `, `+ `)
+    r"|\d+\.\s"                # ordered list (`1. `)
+    r"|>\s?"                   # blockquote (`> `; space optional)
+    r"|---+\s*$"               # HR / setext H2 underline
+    r"|\*\*\*+\s*$"            # HR (`***`)
+    r"|___+\s*$"               # HR (`___`)
+    r"|===+\s*$"               # setext H1 underline
+    r"|\[[^\]\n]+\]:\s"        # link reference definition
+    r"|\[\^[^\]\n]+\]:\s"      # footnote definition
+    r")",
+)
+
+
+def _defang_block_text(s: str) -> str:
+    """Block-aware defang for risk-note overview /
+    observations prose. Composes `_defang_text` (inline
+    defenses: HTML, wikilinks, URL schemes, code fences)
+    with line-start markdown defang.
+
+    Why this exists beyond `_defang_text`: the risk-note
+    body PRESERVES newlines so a 3-5 sentence overview can
+    render with paragraph structure. But preserving newlines
+    lets attacker-controlled prose inject:
+      - `\\n## Fake Finding Accepted` (false heading)
+      - `\\n- Action item: ...` (false list bullet)
+      - `\\n> Quote from auditor` (false blockquote)
+      - `\\n[ref]: file:///etc/passwd` (link reference def)
+      - `\\nText\\n=====` (setext H1 underline turns text into heading)
+
+    Fix: prepend a zero-width space to any line whose
+    start would parse as a markdown block construct. ZWSP
+    is invisible to the auditor reading the rendered note
+    (browsers/Obsidian don't render it), but breaks the
+    parser's "first character of line" recognition for
+    block-level constructs. Inline markdown elsewhere on
+    the line still works.
+    """
+    s = _defang_text(s)
+    return _BLOCK_START_RE.sub(
+        lambda m: f"{m.group(1)}{_ZWSP}{m.group(2)}", s,
+    )
 
 
 def _render_risks(graph_ctx: dict[str, Any]) -> str:
@@ -566,11 +837,16 @@ def _render_risks(graph_ctx: dict[str, Any]) -> str:
             # prefix; if the LLM produced a malformed prefix
             # (hallucinated despite the prompt allowlist),
             # render as a plain bullet rather than building
-            # a broken wikilink.
+            # a broken wikilink. `desc` was already defanged
+            # by `_flatten_to_one_line` above; just trim
+            # surrounding whitespace from the captured reason
+            # — re-running `_flatten_to_one_line` would
+            # double-escape HTML entities (`&amp;` →
+            # `&amp;amp;`).
             m = _RISK_PREFIX_RE.match(desc)
             if m:
                 risk_name = m.group(1)
-                reason = _flatten_to_one_line(m.group(2))
+                reason = m.group(2).strip()
                 curated.append(
                     f"- [[risks/{risk_name}|{risk_name}]] — {reason}"
                 )
@@ -711,6 +987,32 @@ def render_and_write_node_note(
     Raises `ValueError` if `node["kind"] == "method"` — methods are
     documented inside their parent's note, not as standalone files.
     """
+    # Codex round-16 fix: treat the LLM-supplied `node` as
+    # an ID carrier only. Refetch the canonical dict from
+    # the graph using ONLY `node["id"]`, then use the
+    # refetched node for every downstream decision (kind,
+    # name, location, frontmatter, rel_path, annotations).
+    #
+    # Why: a prompt-injected NodeDocumenter could forge
+    # arbitrary fields. The reproduced exploit set
+    # `node["name"]="../risks/node-pwn"`, which
+    # `_disambiguated_path` interpolated into
+    # `f"{folder}/{bare}"` producing
+    # `contracts/../risks/node-pwn.md`. `write_obsidian_note`'s
+    # `resolve().relative_to(vault)` check passes (the
+    # resolved path is still inside the vault) — so the
+    # attacker got an in-vault arbitrary-write primitive
+    # that could clobber a curated risk note.
+    #
+    # The refetch contract: callers MUST pass a node_id that
+    # resolves in the graph. Any failure (graph not loaded,
+    # node not in graph, cache I/O error) raises here rather
+    # than degrading to "use LLM-supplied dict" — that
+    # degradation IS the bypass an attacker exploits by
+    # forging a graph_id pointing at a non-existent cache.
+    node_id = node["id"]
+    node = get_node(graph_id, node_id, cache_root=cache_root)
+
     kind = node["kind"]
     if kind == "method":
         raise ValueError(
@@ -720,6 +1022,21 @@ def render_and_write_node_note(
         )
 
     ctx = dict(graph_ctx) if graph_ctx else {}
+    # Codex round-15 fix: drop LLM-supplied diagram fields
+    # BEFORE trusted regen. Only the renderer-produced
+    # `render_inheritance` / `render_call_graph` strings may
+    # populate these keys. If diagram regen fails inside the
+    # try-block below, the keys stay absent and
+    # `_render_graph_context` emits no diagram section —
+    # raw LLM Mermaid (`## INJECTED HEADING`,
+    # `[[../../etc/passwd]]`, `<iframe>`) can never survive.
+    #
+    # Pop both unconditionally (even when the LLM didn't
+    # supply them) so the narrow blast radius is obvious to
+    # future readers — there is no caller-controlled
+    # fall-through path.
+    ctx.pop("inheritance_mermaid", None)
+    ctx.pop("call_graph_mermaid", None)
 
     # Diagrams are enrichment — never block note writing on
     # EXPECTED failures (bad graph_id, test-synthesized node,
@@ -756,6 +1073,16 @@ def render_and_write_node_note(
             node["id"],
             e,
         )
+        # Codex round-15 fix: clear any partial diagram
+        # output from the trusted regen path too. If
+        # `render_inheritance` succeeded but `render_call_graph`
+        # raised, the inheritance diagram is still trusted —
+        # but a partial state is harder to reason about than
+        # "all-or-nothing diagrams". Drop both for symmetry
+        # with the pre-try strip; the rendered note shows no
+        # diagrams instead of half a diagram block.
+        ctx.pop("inheritance_mermaid", None)
+        ctx.pop("call_graph_mermaid", None)
 
     # Filename disambiguation needs the graph to detect bare-
     # name collisions. Same graceful fallback as the diagram
@@ -786,19 +1113,44 @@ def render_and_write_node_note(
         rel_path = f"{folder}/{node['name']}.md"
 
     # Pull finding annotations from the graph so the Risks
-    # section can render them. Same graceful-degradation
-    # pattern as the diagram block above — if the cache is
-    # missing or unreadable (test fixture, transient I/O),
-    # proceed with an empty list rather than aborting the
-    # note. Coding bugs (TypeError, AttributeError) propagate
-    # so they surface in the dispatcher's failure summary.
+    # section can render them. Includes findings attached to
+    # the container node itself PLUS findings attached to
+    # child methods (Trailmark IDs `<container>.<method>`).
+    #
+    # Why bubble methods up: slither/semgrep attach findings
+    # at method-level granularity (e.g.,
+    # `contracts.UniswapV2Pair:UniswapV2Pair._update`), but
+    # methods are documented INSIDE their parent's note
+    # (line 715 above rejects method-kind for standalone
+    # rendering). Without bubbling, method findings have no
+    # standalone note to land in — the auditor would see
+    # them only via vault/risks/ summaries (curated) and
+    # never directly on the parent contract's note.
+    #
+    # Same graceful-degradation pattern as the diagram block
+    # above. Coding bugs (TypeError, AttributeError) propagate.
     try:
-        ctx["finding_annotations"] = annotations_of(
-            graph_id,
-            node["id"],
-            kind="finding",
-            cache_root=cache_root,
+        node_id = node["id"]
+        method_prefix = node_id + "."
+        # `nodes_with_annotation` returns BARE node dicts (no
+        # embedded findings — Trailmark 0.3.x). One enumeration
+        # + per-match annotations_of call is necessary to get
+        # the descriptions. Filter to container itself + method
+        # children by ID prefix.
+        annotated_nodes = nodes_with_annotation(
+            graph_id, "finding", cache_root=cache_root,
         )
+        bubbled: list[dict[str, Any]] = []
+        for n in annotated_nodes:
+            nid = n.get("id", "")
+            if nid == node_id or nid.startswith(method_prefix):
+                bubbled.extend(
+                    annotations_of(
+                        graph_id, nid, kind="finding",
+                        cache_root=cache_root,
+                    )
+                )
+        ctx["finding_annotations"] = bubbled
     except (
         KeyError,
         FileNotFoundError,
@@ -820,6 +1172,68 @@ def render_and_write_node_note(
         vault_path, rel_path, frontmatter, body_text
     )
     return str(written)
+
+
+def _validate_flow_path(
+    graph_id: str,
+    path: list[str],
+    expected_entrypoint_id: str,
+    *,
+    cache_root: Path,
+) -> str | None:
+    """Validate a flow path against the trusted graph. Return
+    None when valid, or a short reason string when invalid.
+
+    Codex round-17 fix: an LLM-supplied path is a list of node
+    ids. `render_sequence` is explicitly path-agnostic — it
+    will happily draw `A --> B --> C` even when `(A, B)` is
+    NOT a real call edge in the graph. A prompt-injected
+    FlowTracer could synthesize misleading paths
+    (`UniswapV2Pair.swap --> UniswapV2ERC20.constructor`)
+    that look authoritative in the rendered note.
+
+    Three checks, in order:
+      1. `path[0] == expected_entrypoint_id` — every flow path
+         must start at the entrypoint the dispatcher bound.
+      2. Every hop id must resolve via `get_node` — defends
+         against fabricated node ids that look real.
+      3. Every consecutive `(src, dst)` pair must appear in
+         `callees_of(graph_id, src)` — defends against
+         fabricated call edges.
+
+    Why return a reason string instead of raising: the caller
+    emits an inline placeholder for invalid paths so a partial
+    flow note still ships. Raising would lose the per-path
+    granularity that the existing render_sequence except
+    handler already provides for legitimate-but-uncomputable
+    paths."""
+    if not path:
+        return "empty path"
+    if path[0] != expected_entrypoint_id:
+        return (
+            f"path[0]={path[0]!r} != expected entrypoint "
+            f"{expected_entrypoint_id!r}"
+        )
+    # Check every hop exists. get_node raises KeyError on
+    # unknown ids; we want a reason string, not the raise.
+    for hop in path:
+        try:
+            get_node(graph_id, hop, cache_root=cache_root)
+        except KeyError:
+            return f"hop {hop!r} not in graph"
+    # Check every (src, dst) is a real call edge.
+    for src, dst in zip(path, path[1:]):
+        callee_ids = {
+            c["id"] for c in callees_of(
+                graph_id, src, cache_root=cache_root,
+            )
+        }
+        if dst not in callee_ids:
+            return (
+                f"hop {src!r} -> {dst!r} is not a real call "
+                f"edge in the graph"
+            )
+    return None
 
 
 def render_and_write_flow_note(
@@ -853,6 +1267,23 @@ def render_and_write_flow_note(
 
     Returns the absolute file path as a string (LLM-friendly).
     """
+    # Codex round-16 fix: refetch the canonical entrypoint
+    # from the graph. Mirrors `render_and_write_node_note`'s
+    # defense — the LLM-supplied dict is an ID carrier only.
+    # Reproduced exploit: forged
+    # `entrypoint_node["name"]="../risks/flow-pwn"` produces
+    # `rel_path="flows/../risks/flow-pwn.md"` which resolves
+    # to `vault/risks/flow-pwn.md` — INSIDE the vault, so the
+    # resolve-based containment check passed. Because flow
+    # dispatch runs before risk synthesis + MOC generation,
+    # the attacker could plant a fake "risk" note that gets
+    # indexed alongside real ones. Strict refetch closes
+    # that; `write_obsidian_note`'s `..`-segment reject is
+    # the belt-and-suspenders catch-all.
+    entrypoint_node = get_node(
+        graph_id, entrypoint_node["id"], cache_root=cache_root,
+    )
+
     bare = entrypoint_node["name"]
     # Always qualify with the containing class so two entrypoints
     # with the same method name (e.g. UniswapV2Pair.swap vs
@@ -876,9 +1307,52 @@ def render_and_write_flow_note(
     parts: list[str] = [_render_overview(overview), "\n"]
     if paths:
         parts.append("## Paths\n\n")
+        safe_bare = _flatten_to_one_line(bare)
         for i, path in enumerate(paths, 1):
-            sink_bare = path[-1].rsplit(":", 1)[-1].rsplit(".", 1)[-1]
-            parts.append(f"### Path {i} — {bare} → {sink_bare}\n\n")
+            # Codex round-18 fix: validate FIRST, before any
+            # `path[-1]` / `path[0]` indexing. The validator
+            # has an explicit empty-path branch but it was
+            # previously unreachable — `path[-1]` on
+            # `paths=[[]]` raised IndexError before validation
+            # ran, failing the whole flow note instead of
+            # degrading to a per-path placeholder.
+            invalid_reason = _validate_flow_path(
+                graph_id, path, entrypoint_node["id"],
+                cache_root=cache_root,
+            )
+            if invalid_reason is not None:
+                _log.warning(
+                    "rejecting invalid flow path %d (%s): %s",
+                    i, path, invalid_reason,
+                )
+                # Generic heading — no `path[-1]` indexing,
+                # safe for the empty-path case.
+                parts.append(
+                    f"### Path {i} — invalid path\n\n"
+                )
+                parts.append(
+                    f"_Path rejected: "
+                    f"{_flatten_to_one_line(invalid_reason)}_\n\n"
+                )
+                # Skip the diagram render AND the hop list —
+                # rendering hops of a fabricated path would
+                # still be misleading.
+                continue
+
+            # Sink bare is LLM-influenced (path is the LLM's
+            # argument); bare is the canonical entrypoint name
+            # from the round-16 refetch — trusted. Flatten so
+            # a newline in `sink_bare` can't escape the heading
+            # line and inject a second heading or list. The
+            # validator above guarantees `path` is non-empty
+            # before we index `path[-1]`.
+            sink_bare = _flatten_to_one_line(
+                path[-1].rsplit(":", 1)[-1].rsplit(".", 1)[-1]
+            )
+            parts.append(
+                f"### Path {i} — {safe_bare} → {sink_bare}\n\n"
+            )
+
             try:
                 parts.append(
                     render_sequence(graph_id, path, cache_root=cache_root)
@@ -904,8 +1378,15 @@ def render_and_write_flow_note(
                     path,
                     e,
                 )
+                # Defang the exception message — it may
+                # echo back LLM-controlled hop_id content
+                # (KeyError on a malicious node ID puts the
+                # whole bad string in the exception). Without
+                # defang, embedded wikilinks/HTML in the LLM
+                # input survive into the rendered placeholder.
                 parts.append(
-                    f"_Sequence diagram unavailable: {e}_\n\n"
+                    f"_Sequence diagram unavailable: "
+                    f"{_flatten_to_one_line(str(e))}_\n\n"
                 )
             # Hop wikilinks: per-method navigation below the
             # sequence diagram. Unresolvable hops fall back to
@@ -932,7 +1413,12 @@ def render_and_write_flow_note(
                     EOFError,
                     pickle.UnpicklingError,
                 ):
-                    hop_bare = hop_id.rsplit(":", 1)[-1]
+                    # Same defang as risk-note involved-node
+                    # fallback — hop_id is LLM-controlled
+                    # via the `paths` arg.
+                    hop_bare = _defang_inline_code_text(
+                        hop_id.rsplit(":", 1)[-1]
+                    )
                     parts.append(
                         f"{j}. `{hop_bare}` (no contract note)\n"
                     )
@@ -946,7 +1432,12 @@ def render_and_write_flow_note(
     if observations:
         parts.append("## Observations\n\n")
         for obs in observations:
-            parts.append(f"- {obs}\n")
+            # Defang LLM-authored observation text (Codex
+            # round-13 fix). Block-aware so a multi-line
+            # observation can't inject ## headings, but the
+            # bullet itself stays single-bullet because we
+            # control the `- ` prefix.
+            parts.append(f"- {_defang_block_text(obs)}\n")
 
     body = "".join(parts)
     written = write_obsidian_note(
@@ -1018,6 +1509,20 @@ def render_and_write_risk_note(
     if involved_nodes is None:
         involved_nodes = []
 
+    # Codex review fixes (F5 + follow-up F1):
+    # RiskSynthesizer's `overview` and `observations` come
+    # from the LLM processing attacker-influenced SARIF
+    # context. The overview defang now lives inside
+    # `_render_overview` so EVERY caller (node + flow + risk)
+    # gets it. We still pre-defang observations here because
+    # observations are interpolated inline into the body
+    # below (not via _render_overview).
+    safe_observations = (
+        [_defang_block_text(o) for o in observations]
+        if observations
+        else observations
+    )
+
     rel_path = f"risks/{risk_name}.md"
     frontmatter: dict[str, Any] = {
         "type": "risk",
@@ -1045,7 +1550,12 @@ def render_and_write_risk_note(
             ):
                 # Same fallback as flow note hops: backticked
                 # bare name when wikilink resolution fails.
-                bare = nid.rsplit(":", 1)[-1]
+                # LLM-controlled nid: defang for inline-code-
+                # span context so embedded backticks /
+                # newlines / wikilinks can't break out.
+                bare = _defang_inline_code_text(
+                    nid.rsplit(":", 1)[-1]
+                )
                 parts.append(f"- `{bare}` (no contract note)\n")
         parts.append("\n")
     else:
@@ -1053,9 +1563,9 @@ def render_and_write_risk_note(
             "_No involved nodes recorded for this risk._\n\n"
         )
 
-    if observations:
+    if safe_observations:
         parts.append("## Observations\n\n")
-        for obs in observations:
+        for obs in safe_observations:
             parts.append(f"- {obs}\n")
 
     body = "".join(parts)

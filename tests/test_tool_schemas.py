@@ -117,8 +117,16 @@ def test_wrapped_writers_actually_invokable_without_vault_path():
     This is the load-bearing armor — without it, a future
     refactor could replace the closure with InjectedToolArg-
     only and the schema tests would still pass while the
-    actual LLM invocations broke."""
+    actual LLM invocations broke.
+
+    Round-17 update: the wrapper no longer accepts `node`. The
+    LLM-visible surface is `graph_id`, `graph_ctx`, `body`.
+    The node id comes from the `_EXPECTED_NODE_ID` contextvar
+    set by `_invoke_one`. Pin both: the LLM can invoke without
+    `node`, AND the wrapper forwards the contextvar's id."""
     from unittest.mock import patch
+
+    from src.agent import _EXPECTED_NODE_ID
 
     node_tool = next(
         t
@@ -127,30 +135,139 @@ def test_wrapped_writers_actually_invokable_without_vault_path():
     )
     wrapped = StructuredTool.from_function(node_tool)
     # Args the LLM can see + supply (no vault_path, no
-    # cache_root).
+    # cache_root, no `node` — round-17 dropped it from the
+    # LLM-facing surface).
     visible_args = set(wrapped.tool_call_schema.model_fields.keys())
     assert "vault_path" not in visible_args
     assert "cache_root" not in visible_args
+    assert "node" not in visible_args, (
+        f"`node` leaked back into the LLM schema: {visible_args}"
+    )
 
     # Invoke via the StructuredTool path the framework uses.
     # Patch the real writer to avoid touching the filesystem
-    # — we only care that the wrapper passes vault_path.
-    with patch(
-        "src.agent.render_and_write_node_note",
-        return_value="/fake/path.md",
-    ) as fake:
-        result = wrapped.invoke({
+    # — we only care that the wrapper passes vault_path AND
+    # synthesizes the node carrier from the contextvar.
+    token = _EXPECTED_NODE_ID.set("expected.module:ExpectedNode")
+    try:
+        with patch(
+            "src.agent.render_and_write_node_note",
+            return_value="/fake/path.md",
+        ) as fake:
+            result = wrapped.invoke({
+                "graph_id": "abcdef012345",
+                "graph_ctx": {},
+                "body": "test",
+            })
+    finally:
+        _EXPECTED_NODE_ID.reset(token)
+
+    assert result == "/fake/path.md"
+    # The closure forwarded the orchestrator's vault_path as
+    # the first positional arg AND the contextvar's id as the
+    # third (the node-carrier dict).
+    call_args = fake.call_args
+    assert call_args.args[0] == _FAKE_VAULT
+    assert call_args.args[2] == {"id": "expected.module:ExpectedNode"}
+
+
+def test_wrapper_cannot_be_redirected_by_llm_smuggled_node():
+    """Codex round-17 cross-node defense end-to-end: even if
+    an LLM tries to smuggle a `node` argument (or any
+    arbitrary key in `graph_ctx`), the Pydantic-generated
+    schema rejects the unknown field at validation time AND
+    the wrapper would still use the contextvar id.
+
+    Pin both layers: (1) the schema rejects unknown fields,
+    so the LLM literally can't call the tool with a `node`
+    arg; (2) even if `graph_ctx` contains an "id" key, the
+    wrapper forwards the contextvar id, not the smuggled
+    one. The first layer is the primary defense; the second
+    is belt-and-suspenders for any future schema change."""
+    from unittest.mock import patch
+
+    from src.agent import _EXPECTED_NODE_ID
+
+    node_tool = next(
+        t
+        for t in WRAPPED_NODE_DOCUMENTER["tools"]
+        if getattr(t, "__name__", "") == "render_and_write_node_note"
+    )
+    wrapped = StructuredTool.from_function(node_tool)
+
+    token = _EXPECTED_NODE_ID.set("expected:Node")
+    try:
+        with patch(
+            "src.agent.render_and_write_node_note",
+            return_value="/fake/path.md",
+        ) as fake:
+            # The LLM smuggles a "node" key inside graph_ctx
+            # (since `node` itself is not on the schema). The
+            # wrapper passes graph_ctx through; downstream
+            # `render_and_write_node_note` ignores any "node"
+            # key in graph_ctx (it consults the `node` POSITIONAL
+            # arg only). The wrapper builds that positional arg
+            # from the contextvar.
+            result = wrapped.invoke({
+                "graph_id": "abcdef012345",
+                "graph_ctx": {
+                    "node": {"id": "ATTACKER:Smuggled"},
+                    "callers": [],
+                },
+                "body": "test",
+            })
+    finally:
+        _EXPECTED_NODE_ID.reset(token)
+
+    assert result == "/fake/path.md"
+    # Positional node-carrier dict — must be the expected id,
+    # NOT "ATTACKER:Smuggled".
+    call_args = fake.call_args
+    assert call_args.args[2] == {"id": "expected:Node"}, (
+        f"cross-node smuggle succeeded: {call_args.args[2]}"
+    )
+
+
+def test_wrapped_writers_reject_invocation_outside_dispatch_context():
+    """Round-17 contract: calling the wrapper without setting
+    `_EXPECTED_NODE_ID` / `_EXPECTED_ENTRYPOINT_ID` raises
+    RuntimeError. The wrapper has no sane default for the
+    node id — every legitimate caller goes through `_invoke_one`,
+    which sets the contextvar. Pin this so a future change
+    that swaps RuntimeError for a silent fallback (e.g.,
+    "use a sentinel id") gets caught."""
+    import pytest
+
+    node_tool = next(
+        t
+        for t in WRAPPED_NODE_DOCUMENTER["tools"]
+        if getattr(t, "__name__", "") == "render_and_write_node_note"
+    )
+    wrapped_node = StructuredTool.from_function(node_tool)
+    with pytest.raises(
+        RuntimeError, match="outside a dispatch context"
+    ):
+        wrapped_node.invoke({
             "graph_id": "abcdef012345",
-            "node": {"id": "x", "kind": "contract", "name": "X"},
             "graph_ctx": {},
             "body": "test",
         })
 
-    assert result == "/fake/path.md"
-    # The closure forwarded the orchestrator's vault_path as
-    # the first positional arg.
-    call_args = fake.call_args
-    assert call_args.args[0] == _FAKE_VAULT
+    flow_tool = next(
+        t
+        for t in WRAPPED_FLOW_TRACER["tools"]
+        if getattr(t, "__name__", "") == "render_and_write_flow_note"
+    )
+    wrapped_flow = StructuredTool.from_function(flow_tool)
+    with pytest.raises(
+        RuntimeError, match="outside a dispatch context"
+    ):
+        wrapped_flow.invoke({
+            "graph_id": "abcdef012345",
+            "paths": [],
+            "overview": "ov",
+            "observations": [],
+        })
 
 
 def test_python_callers_can_still_pass_cache_root():

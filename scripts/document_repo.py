@@ -135,7 +135,12 @@ def main() -> int:
     else:
         print("  OK: no broken wikilinks")
 
-    return 0 if not result["failures"] else 1
+    # Nonzero on EITHER node OR flow failures. Phase 3 flow
+    # dispatch is part of the run — silent flow failures would
+    # leave CI green while shipping incomplete vaults.
+    if result["failures"] or flow_result["failures"]:
+        return 1
+    return 0
 
 
 def _find_broken_wikilinks(vault: Path) -> list[tuple[Path, str]]:
@@ -156,4 +161,12 @@ def _find_broken_wikilinks(vault: Path) -> list[tuple[Path, str]]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # os._exit bypasses Python's normal shutdown (which waits
+    # for non-daemon ThreadPoolExecutor workers). A wedged LLM
+    # call leaves a worker stuck in invoke(); without this,
+    # the process would hang after the summary prints. Flush
+    # stdio first so the summary isn't truncated.
+    _rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)

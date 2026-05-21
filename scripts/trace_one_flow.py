@@ -143,4 +143,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # os._exit bypasses Python's normal shutdown (which waits
+    # for non-daemon ThreadPoolExecutor workers in
+    # dispatch_flows). A wedged LLM call would otherwise pin
+    # the process alive after the summary prints.
+    _rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)

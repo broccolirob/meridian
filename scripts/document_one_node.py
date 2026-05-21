@@ -28,6 +28,7 @@ load_dotenv()
 from deepagents import create_deep_agent  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
+from src.agent import _wrap_subagent_writers  # noqa: E402
 from src.render.obsidian import KIND_TO_FOLDER, ensure_vault  # noqa: E402
 from src.subagents import NODE_DOCUMENTER_SUBAGENT  # noqa: E402
 from src.tools import (  # noqa: E402
@@ -46,12 +47,13 @@ You are the washable orchestrator. Your ONLY job: dispatch the task
 to the `node-documenter` subagent via the `task` tool.
 
 Rules:
-- Pass graph_id, node_id, vault_path (absolute), and overview_hint
-  verbatim from the user message.
-- The subagent MUST call render_and_write_node_note() to persist the
-  note to disk. If its reply does not include an absolute file path
-  that begins with vault_path, dispatch it AGAIN with explicit
-  instructions to actually call render_and_write_node_note.
+- Pass graph_id, node_id, and overview_hint verbatim from the user
+  message. The vault path is bound by the harness at subagent
+  construction time and is NOT an LLM-callable parameter.
+- The subagent MUST call render_and_write_node_note() to persist
+  the note to disk. If its reply does not include an absolute file
+  path, dispatch it AGAIN with explicit instructions to actually
+  call render_and_write_node_note.
 - Do not generate note content yourself. Do not paraphrase the
   subagent's reply. Return only the absolute file path it produced.
 """
@@ -126,17 +128,26 @@ def main() -> int:
 
     print(f"[4/4] Running NodeDocumenter on {args.model}...")
     model = ChatOpenAI(model=args.model)
+    # Wrap the subagent's writer tools so vault_path is bound
+    # by the harness (a trusted Python value), NOT exposed as
+    # an LLM-callable arg. Without this wrapping, a prompt-
+    # injected agent could supply vault_path=/etc/passwd via
+    # the tool schema and write outside the intended vault.
+    # Mirrors the production wrapping done by build_agent in
+    # src/agent.py — kept separate here so the harness can use
+    # its own single-node _MAIN_AGENT_PROMPT.
     agent = create_deep_agent(
         model=model,
-        subagents=[NODE_DOCUMENTER_SUBAGENT],
+        subagents=[
+            _wrap_subagent_writers(NODE_DOCUMENTER_SUBAGENT, str(vault))
+        ],
         system_prompt=_MAIN_AGENT_PROMPT,
     )
 
     task_msg = (
         f"Document the node `{args.node_id}` in graph `{graph_id}`. "
-        f"vault_path (absolute) = {vault}. "
-        f"The subagent must call render_and_write_node_note() with "
-        f"this vault_path as its first argument. "
+        f"Dispatch the `node-documenter` subagent via the `task` "
+        f"tool — do not generate note content yourself. "
         f"overview_hint = {args.overview or '(none — write your own)'}"
     )
     result = agent.invoke(
@@ -181,4 +192,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # os._exit bypasses Python's normal shutdown (which waits
+    # for non-daemon ThreadPoolExecutor workers). A wedged LLM
+    # call leaves a worker stuck in invoke(); without this,
+    # the process would hang after the agent reply prints.
+    # Flush stdio first so output isn't truncated.
+    _rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(_rc)

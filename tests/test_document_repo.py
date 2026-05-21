@@ -159,3 +159,59 @@ def test_returns_1_when_dispatch_topo_has_failures(
     )
 
     assert script_module.main() == 1
+
+
+def test_returns_1_when_dispatch_flows_has_failures(
+    script_module, monkeypatch, tmp_path
+):
+    """Flow dispatch failures must also propagate to exit
+    code 1 — silent flow failures would leave CI green while
+    shipping vaults missing FlowTracer notes."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+
+    # All node dispatches succeed; only flow dispatch fails.
+    monkeypatch.setattr(
+        script_module,
+        "dispatch_topo",
+        lambda *a, **k: {
+            "graph_id": "abc",
+            "node_count": 1,
+            "successes": [
+                {"node_id": "n1", "agent_reply": "/n1.md"}
+            ],
+            "failures": [],
+            "order": ["n1"],
+        },
+    )
+    monkeypatch.setattr(
+        script_module,
+        "dispatch_flows",
+        lambda *a, **k: {
+            "graph_id": "abc",
+            "entrypoint_count": 2,
+            "successes": [
+                {"node_id": "e1", "agent_reply": "/e1.md"}
+            ],
+            "failures": [
+                {"node_id": "e2", "error": "TimeoutError: ..."}
+            ],
+            "order": ["e1", "e2"],
+        },
+    )
+    monkeypatch.setattr(
+        script_module, "write_root_moc", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    assert script_module.main() == 1, (
+        "flow dispatch failures must produce exit 1 — silent "
+        "flow failures would leave CI green while shipping "
+        "incomplete vaults"
+    )

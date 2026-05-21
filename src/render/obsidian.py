@@ -732,7 +732,14 @@ def render_and_write_flow_note(
                 )
             # Hop wikilinks: per-method navigation below the
             # sequence diagram. Unresolvable hops fall back to
-            # a backticked bare name.
+            # a backticked bare name. Must catch the same family
+            # of expected failures as the outer render_sequence
+            # block — resolve_wikilink → get_node → load_graph
+            # can raise FileNotFoundError (missing cache),
+            # OSError / EOFError / UnpicklingError (cache I/O).
+            # Without these, a partial-failure flow note aborts
+            # entirely instead of shipping with placeholder hops.
+            # Coding bugs (TypeError, AttributeError) propagate.
             parts.append("\n**Hops:**\n\n")
             for j, hop_id in enumerate(path, 1):
                 try:
@@ -740,7 +747,14 @@ def render_and_write_flow_note(
                         graph_id, hop_id, cache_root=cache_root
                     )
                     parts.append(f"{j}. {link}\n")
-                except KeyError:
+                except (
+                    KeyError,
+                    FileNotFoundError,
+                    ValueError,
+                    OSError,
+                    EOFError,
+                    pickle.UnpicklingError,
+                ):
                     hop_bare = hop_id.rsplit(":", 1)[-1]
                     parts.append(
                         f"{j}. `{hop_bare}` (no contract note)\n"

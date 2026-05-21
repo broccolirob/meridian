@@ -619,9 +619,19 @@ def _run_pool(
     `dispatch_flows` calls it once with the flat entrypoint list.
 
     Pool uses explicit shutdown(wait=False, cancel_futures=True)
-    instead of context manager because the `with` form blocks
-    on hung workers. Hung workers are daemon threads and die
-    when the process exits.
+    instead of the context manager because the `with` form blocks
+    on hung workers — the dispatch summary returns promptly even
+    if some invocations are wedged.
+
+    Process-exit caveat: ThreadPoolExecutor workers are NOT
+    daemon threads (Python default). A truly hung worker (e.g.,
+    wedged HTTP call) will keep the Python process alive after
+    main() returns, because the interpreter waits for all non-
+    daemon threads. The per-invoke timeout fires and on_done
+    records "fail" correctly, so the dispatch summary is right;
+    but the operator may need to ctrl-C if every retry path is
+    wedged. Script entry points (scripts/document_*.py) work
+    around this with `os._exit(rc)` after flushing stdio.
 
     `log_kind` distinguishes log messages between dispatchers
     ("dispatch" vs "flow dispatch"). Kept as a parameter — not

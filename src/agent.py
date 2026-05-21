@@ -31,13 +31,18 @@ from typing import Any, Callable
 from deepagents import SubAgent, create_deep_agent
 from langchain_openai import ChatOpenAI
 
-from src.graph.persist import _validate_graph_id
+from src.graph.persist import _validate_graph_id, load_graph
 from src.graph.topo import topo_levels, topo_order
 from src.render.obsidian import (
     render_and_write_flow_note,
     render_and_write_node_note,
+    render_and_write_risk_note,
 )
-from src.subagents import FLOW_TRACER_SUBAGENT, NODE_DOCUMENTER_SUBAGENT
+from src.subagents import (
+    FLOW_TRACER_SUBAGENT,
+    NODE_DOCUMENTER_SUBAGENT,
+    RISK_SYNTHESIZER_SUBAGENT,
+)
 from src.tools import attack_surface, callees_of, graph_summary
 
 _log = logging.getLogger(__name__)
@@ -86,12 +91,16 @@ becomes real — until then, treat that step as a no-op):
    and entrypoint count. Useful context for planning. [Phase 0]
 
 3. Run `run_preanalysis(graph_id)` for security subgraphs (taint,
-   blast radius, privilege boundaries). [Phase 4 — tool not yet
-   available; skip silently for now.]
+   blast radius, privilege boundaries). [Phase 4 — the orchestrator
+   script handles this BEFORE invoking you; the subgraphs are
+   already registered on the graph by the time you receive a
+   task.]
 
 4. If the language is Solidity, run slither and call
    `augment_sarif(graph_id, sarif_path)` to merge findings into the
-   graph. [Phase 4 — skip for now.]
+   graph. [Phase 4 — the orchestrator script handles this BEFORE
+   invoking you; finding annotations are already attached to nodes
+   by the time you receive a task.]
 
 5. Compute a topological order over the documentable node graph
    via `topo_order(graph_id)`. This returns node IDs in dependency
@@ -112,8 +121,14 @@ becomes real — until then, treat that step as a no-op):
    The Python driver `dispatch_flows` walks the entrypoint list;
    you do NOT loop. Do not invent extra dispatches.
 
-8. Dispatch the `risk-synthesizer` subagent ONCE over the
-   augmented graph. [Phase 4 — skip for now.]
+8. RiskSynthesizer dispatch: When invoked with a "Synthesize the
+   three risk notes..." task message, dispatch the
+   `risk-synthesizer` subagent via the `task` tool (passing
+   graph_id), and return the JSON list of absolute file paths the
+   subagent wrote. The Python driver `dispatch_risk_synthesis`
+   triggers this once after dispatch_topo and dispatch_flows drain
+   (RiskSynthesizer issues many `annotate` calls that would
+   contend on _ANNOTATE_LOCK with concurrent workers).
 
 9. Write the root `README.md` map-of-content into vault_path with
    wikilinks into every populated section. [Phase 2 — skip for now.]
@@ -186,6 +201,25 @@ def _wrap_subagent_writers(
             observations,
         )
 
+    def _safe_write_risk_note(
+        graph_id: str,
+        risk_name: str,
+        overview: str,
+        involved_nodes: list[str],
+        observations: list[str] | None = None,
+    ) -> str:
+        """Write a risk note. The vault root is supplied by the
+        orchestrator at build time, not by the LLM. Same contract
+        as `render_and_write_risk_note` minus `vault_path`."""
+        return render_and_write_risk_note(
+            vault_path,
+            graph_id,
+            risk_name,
+            overview,
+            involved_nodes,
+            observations,
+        )
+
     # Match the LLM-visible tool name to the original. We can't
     # use functools.wraps because that would copy the full signature
     # back in (including vault_path), defeating the fix.
@@ -193,12 +227,16 @@ def _wrap_subagent_writers(
     _safe_write_node_note.__doc__ = render_and_write_node_note.__doc__
     _safe_write_flow_note.__name__ = render_and_write_flow_note.__name__
     _safe_write_flow_note.__doc__ = render_and_write_flow_note.__doc__
+    _safe_write_risk_note.__name__ = render_and_write_risk_note.__name__
+    _safe_write_risk_note.__doc__ = render_and_write_risk_note.__doc__
 
     def _replace_writer(t: Any) -> Any:
         if t is render_and_write_node_note:
             return _safe_write_node_note
         if t is render_and_write_flow_note:
             return _safe_write_flow_note
+        if t is render_and_write_risk_note:
+            return _safe_write_risk_note
         return t
 
     wrapped: SubAgent = {
@@ -258,6 +296,7 @@ def build_agent(
         subagents=[
             _wrap_subagent_writers(NODE_DOCUMENTER_SUBAGENT, vault_path),
             _wrap_subagent_writers(FLOW_TRACER_SUBAGENT, vault_path),
+            _wrap_subagent_writers(RISK_SYNTHESIZER_SUBAGENT, vault_path),
         ],
         system_prompt=_build_system_prompt(graph_id, vault_path),
         tools=[
@@ -913,3 +952,146 @@ def dispatch_flows(
         "failures": failures,
         "order": order,
     }
+
+
+_RISK_SYNTHESIS_TEMPLATE = (
+    "Synthesize the three risk notes (hotspots, "
+    "delegatecall-sites, reentrancy-candidates) for graph "
+    "`{graph_id}` by dispatching the `risk-synthesizer` "
+    "subagent ONCE via the `task` tool — do not generate the "
+    "risk note content yourself. Return the JSON list of "
+    "absolute file paths the subagent wrote."
+)
+
+
+def dispatch_risk_synthesis(
+    graph_id: str,
+    vault_path: str | Path,
+    *,
+    model: str = DEFAULT_MODEL,
+    per_invoke_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT,
+) -> dict[str, Any]:
+    """Invoke the risk-synthesizer subagent ONCE.
+
+    PRECONDITION: caller MUST complete `dispatch_topo` and
+    `dispatch_flows` BEFORE calling this. RiskSynthesizer
+    issues 15-45 `annotate` calls in a single invocation;
+    concurrent NodeDocumenter/FlowTracer workers would
+    serialize on `_ANNOTATE_LOCK` and stall the dispatch
+    pool. See `src/subagents.py:RISK_SYNTHESIZER_SUBAGENT`
+    description for the full constraint.
+
+    Also enforced at runtime: a fail-fast precondition check
+    verifies `run_preanalysis` has registered the "tainted"
+    subgraph on this graph. Without preanalysis subgraphs,
+    RiskSynthesizer would silently produce empty/wrong risk
+    notes — better to error out concretely.
+
+    Single invocation wrapped in a 1-future ThreadPoolExecutor
+    so the orchestrator-level `per_invoke_timeout` catches
+    langgraph/deepagents deadlocks where no HTTP request is
+    in flight (request_timeout alone is insufficient — same
+    defense as dispatch_topo/dispatch_flows; see
+    DEFAULT_PER_INVOKE_TIMEOUT comment for the hang scenario).
+    Catches all exceptions and reports via the result dict so
+    the orchestrator script can degrade gracefully (rc=2,
+    advisory) instead of aborting the whole run when risk
+    synthesis fails.
+
+    PARTIAL-STATE WARNING: a mid-flight failure (timeout, LLM
+    crash, network) can leave the engine in a partial state:
+    N of M `annotate` calls already saved to disk
+    (atomically), but 0 of 3 risk notes written. Chunk 4.7's
+    node-note "Risks" section would then cite finding-
+    annotations whose corresponding risk note doesn't exist.
+    A rerun is approximately idempotent (annotations
+    deduplicate on description equality), but operators
+    should check `<vault>/risks/` is populated before
+    treating a partial run as canonical.
+
+    Returns:
+        {graph_id, ok, reply, error}. `ok=True` means the
+        agent returned without raising; the LLM may still
+        have produced an empty risks/ folder (e.g., no
+        findings to synthesize) — check `reply` for the
+        JSON list of paths.
+    """
+    _validate_graph_id(graph_id)
+    _validate_vault_path(vault_path)
+    if per_invoke_timeout <= 0:
+        raise ValueError(
+            f"per_invoke_timeout must be > 0 "
+            f"(got {per_invoke_timeout})"
+        )
+
+    # Precondition guard: refuse to run if preanalysis hasn't
+    # registered the expected subgraphs. Otherwise the LLM
+    # silently synthesizes garbage from empty subgraphs.
+    engine = load_graph(graph_id)
+    registered = set(engine.subgraph_names())
+    if "tainted" not in registered:
+        return {
+            "graph_id": graph_id,
+            "ok": False,
+            "reply": "",
+            "error": (
+                "precondition_failed: run_preanalysis has not "
+                "been called for this graph (no 'tainted' "
+                "subgraph registered). Risk synthesis depends "
+                "on preanalysis subgraphs."
+            ),
+        }
+
+    agent = build_agent(
+        graph_id,
+        vault_path,
+        model=model,
+        request_timeout=per_invoke_timeout - _REQUEST_TIMEOUT_BUFFER,
+    )
+    task_msg = _RISK_SYNTHESIS_TEMPLATE.format(graph_id=graph_id)
+
+    def _invoke() -> str:
+        result = agent.invoke(
+            {"messages": [{"role": "user", "content": task_msg}]}
+        )
+        return result["messages"][-1].content
+
+    # Explicit shutdown(wait=False) — matches _run_pool's
+    # pattern (src/agent.py:_run_pool). A `with` block would
+    # call shutdown(wait=True) on exit and stall on the
+    # wedged daemon worker; using try/finally with wait=False
+    # lets the function return promptly while the orphan
+    # worker dies with the process (daemon thread, killed
+    # by os._exit at script end).
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_invoke)
+        try:
+            reply = future.result(timeout=per_invoke_timeout)
+            return {
+                "graph_id": graph_id,
+                "ok": True,
+                "reply": reply,
+                "error": None,
+            }
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return {
+                "graph_id": graph_id,
+                "ok": False,
+                "reply": "",
+                "error": (
+                    f"per_invoke_timeout ({per_invoke_timeout}s) "
+                    f"exceeded — likely langgraph/deepagents "
+                    f"deadlock"
+                ),
+            }
+        except Exception as e:
+            return {
+                "graph_id": graph_id,
+                "ok": False,
+                "reply": "",
+                "error": str(e),
+            }
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)

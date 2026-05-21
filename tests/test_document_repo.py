@@ -35,15 +35,49 @@ def script_module():
     return mod
 
 
-def test_returns_2_when_no_api_key(script_module, monkeypatch):
-    """Missing OPENAI_API_KEY → exit 2 (setup error)."""
+def _stub_phase4_success(script_module, monkeypatch):
+    """Patch all Phase 4 entry points (run_slither,
+    augment_sarif, run_preanalysis, dispatch_risk_synthesis)
+    to no-op success. Existing rc=0 / rc=1 tests rely on
+    this so slither doesn't actually shell out during the
+    test run (CI may not have the binary; even if it does,
+    the test isn't about Phase 4 behavior)."""
+    monkeypatch.setattr(
+        script_module, "run_slither", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        script_module, "augment_sarif", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "run_preanalysis", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module,
+        "dispatch_risk_synthesis",
+        lambda *a, **k: {
+            "graph_id": "abc",
+            "ok": True,
+            "reply": "[]",
+            "error": None,
+        },
+    )
+
+
+def test_returns_4_when_no_api_key(script_module, monkeypatch):
+    """Missing OPENAI_API_KEY → exit 4 (setup error).
+
+    Chunk 4.6 review fix: rc=4 is the setup-error class,
+    distinct from rc=2 (Phase 4 advisory degradation).
+    Lets CI distinguish 'nothing to ship — fix the setup'
+    from 'ship the partial vault, risk notes pending'.
+    """
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(sys, "argv", ["document_repo.py"])
-    assert script_module.main() == 2
+    assert script_module.main() == 4
 
 
-def test_returns_2_when_repo_missing(script_module, monkeypatch):
-    """Nonexistent --repo path → exit 2."""
+def test_returns_4_when_repo_missing(script_module, monkeypatch):
+    """Nonexistent --repo path → exit 4 (setup error)."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
     monkeypatch.setattr(
         sys, "argv",
@@ -52,18 +86,35 @@ def test_returns_2_when_repo_missing(script_module, monkeypatch):
             "--repo", "/does/not/exist",
         ],
     )
-    assert script_module.main() == 2
+    assert script_module.main() == 4
 
 
-def test_calls_dispatch_topo_then_flows_then_moc(
+def test_calls_phase4_then_topo_then_flows_then_risk_then_moc(
     script_module, monkeypatch, tmp_path
 ):
-    """Script orchestration order: dispatch_topo before
-    dispatch_flows, both before write_root_moc. Derived
-    notes need bases on disk; the MOC needs both."""
+    """Script orchestration order pins the full Phase 4 path:
+    run_slither → augment_sarif → run_preanalysis (Phase 4a,
+    pre-rendering so chunk 4.7's node-note risks section sees
+    annotations) → dispatch_topo → dispatch_flows →
+    dispatch_risk_synthesis (Phase 4b, AFTER the dispatch
+    waves drain — _ANNOTATE_LOCK contention constraint from
+    chunk 4.5) → write_root_moc."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
 
     call_order: list[str] = []
+
+    monkeypatch.setattr(
+        script_module, "run_slither",
+        lambda *a, **k: call_order.append("slither") or None,
+    )
+    monkeypatch.setattr(
+        script_module, "augment_sarif",
+        lambda *a, **k: call_order.append("augment") or {},
+    )
+    monkeypatch.setattr(
+        script_module, "run_preanalysis",
+        lambda *a, **k: call_order.append("preanalysis") or {},
+    )
 
     def fake_topo(*a, **k):
         call_order.append("topo")
@@ -87,12 +138,22 @@ def test_calls_dispatch_topo_then_flows_then_moc(
             "order": [],
         }
 
+    def fake_risk(*a, **k):
+        call_order.append("risk")
+        return {
+            "graph_id": "abc", "ok": True,
+            "reply": "[]", "error": None,
+        }
+
     def fake_moc(*a, **k):
         call_order.append("moc")
         return []  # script expects a list (len() is called on it)
 
     monkeypatch.setattr(script_module, "dispatch_topo", fake_topo)
     monkeypatch.setattr(script_module, "dispatch_flows", fake_flows)
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis", fake_risk
+    )
     monkeypatch.setattr(script_module, "write_root_moc", fake_moc)
 
     monkeypatch.setattr(
@@ -106,10 +167,10 @@ def test_calls_dispatch_topo_then_flows_then_moc(
 
     rc = script_module.main()
     assert rc == 0
-    assert call_order == ["topo", "flows", "moc"], (
-        f"expected dispatch_topo → dispatch_flows → "
-        f"write_root_moc; got {call_order}"
-    )
+    assert call_order == [
+        "slither", "augment", "preanalysis",
+        "topo", "flows", "risk", "moc",
+    ], f"order mismatch; got {call_order}"
 
 
 def test_returns_1_when_dispatch_topo_has_failures(
@@ -119,6 +180,7 @@ def test_returns_1_when_dispatch_topo_has_failures(
     nodes failed) from setup error (2) or full success
     (0)."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_phase4_success(script_module, monkeypatch)
 
     monkeypatch.setattr(
         script_module,
@@ -168,6 +230,7 @@ def test_returns_1_when_dispatch_flows_has_failures(
     code 1 — silent flow failures would leave CI green while
     shipping vaults missing FlowTracer notes."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_phase4_success(script_module, monkeypatch)
 
     # All node dispatches succeed; only flow dispatch fails.
     monkeypatch.setattr(
@@ -214,4 +277,203 @@ def test_returns_1_when_dispatch_flows_has_failures(
         "flow dispatch failures must produce exit 1 — silent "
         "flow failures would leave CI green while shipping "
         "incomplete vaults"
+    )
+
+
+# ---------------------------------------------------------------
+# Phase 4 wiring tests (chunk 4.6)
+# ---------------------------------------------------------------
+
+def _stub_topo_flows_moc(script_module, monkeypatch):
+    """Patch dispatch_topo, dispatch_flows, write_root_moc to
+    no-op success. Used by Phase 4 tests that want to focus
+    on phase-4 behavior without re-stubbing every dispatcher."""
+    monkeypatch.setattr(
+        script_module, "dispatch_topo",
+        lambda *a, **k: {
+            "graph_id": "abc", "node_count": 0,
+            "successes": [], "failures": [], "order": [],
+        },
+    )
+    monkeypatch.setattr(
+        script_module, "dispatch_flows",
+        lambda *a, **k: {
+            "graph_id": "abc", "entrypoint_count": 0,
+            "successes": [], "failures": [], "order": [],
+        },
+    )
+    monkeypatch.setattr(
+        script_module, "write_root_moc", lambda *a, **k: []
+    )
+
+
+def test_phase4_failure_skips_risk_synthesis_but_continues(
+    script_module, monkeypatch, tmp_path,
+):
+    """run_slither raises (e.g., binary missing) →
+    dispatch_risk_synthesis NEVER called, dispatch_topo +
+    dispatch_flows + write_root_moc still execute, rc=2
+    (advisory degradation)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_topo_flows_moc(script_module, monkeypatch)
+
+    def slither_blows_up(*a, **k):
+        raise RuntimeError("slither binary not found")
+
+    monkeypatch.setattr(script_module, "run_slither", slither_blows_up)
+
+    risk_called: list[bool] = []
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis",
+        lambda *a, **k: risk_called.append(True) or {
+            "graph_id": "abc", "ok": True,
+            "reply": "[]", "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    rc = script_module.main()
+    assert rc == 2, (
+        f"Phase 4 failure should yield rc=2 (advisory); got {rc}"
+    )
+    assert risk_called == [], (
+        "dispatch_risk_synthesis must NOT run when Phase 4a "
+        "analyzers failed (RiskSynthesizer depends on findings + "
+        "preanalysis subgraphs that never got attached)"
+    )
+
+
+def test_phase4_creates_audit_dir(
+    script_module, monkeypatch, tmp_path,
+):
+    """vault/.audit/ is created before run_slither writes its
+    SARIF output (chunk 4.6 wiring: parent.mkdir(parents=True,
+    exist_ok=True) before the run_slither call)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_topo_flows_moc(script_module, monkeypatch)
+    _stub_phase4_success(script_module, monkeypatch)
+
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    script_module.main()
+
+    # ensure_vault().resolve() is the vault root; .audit/
+    # sits inside it. tmp_path is the vault arg, but
+    # ensure_vault may resolve symlinks — use the resolved path.
+    audit_dir = tmp_path.resolve() / ".audit"
+    assert audit_dir.is_dir(), (
+        f"Phase 4a must create {audit_dir} before run_slither "
+        f"(SARIF parent dir). Listing: "
+        f"{list(tmp_path.iterdir()) if tmp_path.exists() else 'no vault'}"
+    )
+
+
+def test_phase4_rc2_when_risk_synthesis_fails(
+    script_module, monkeypatch, tmp_path,
+):
+    """Analyzers succeed but dispatch_risk_synthesis returns
+    ok=False → rc=2 (advisory). Distinguishes risk-synth
+    failure from hard topo/flow failures (rc=1)."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+    _stub_topo_flows_moc(script_module, monkeypatch)
+
+    monkeypatch.setattr(
+        script_module, "run_slither", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        script_module, "augment_sarif", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "run_preanalysis", lambda *a, **k: {}
+    )
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis",
+        lambda *a, **k: {
+            "graph_id": "abc", "ok": False,
+            "reply": "", "error": "LLM timeout",
+        },
+    )
+
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    assert script_module.main() == 2
+
+
+def test_phase4_rc1_overrides_rc2_when_topo_fails(
+    script_module, monkeypatch, tmp_path,
+):
+    """Phase 4 degraded AND topo failures → rc=1 (hard
+    failure dominates over advisory). Bug-bait: if the rc
+    branching order flips, an analyzer warning could mask a
+    real topo failure."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-fake-key")
+
+    # Hard topo failure.
+    monkeypatch.setattr(
+        script_module, "dispatch_topo",
+        lambda *a, **k: {
+            "graph_id": "abc", "node_count": 1,
+            "successes": [],
+            "failures": [
+                {"node_id": "n1", "error": "TimeoutError"},
+            ],
+            "order": ["n1"],
+        },
+    )
+    monkeypatch.setattr(
+        script_module, "dispatch_flows",
+        lambda *a, **k: {
+            "graph_id": "abc", "entrypoint_count": 0,
+            "successes": [], "failures": [], "order": [],
+        },
+    )
+    monkeypatch.setattr(
+        script_module, "write_root_moc", lambda *a, **k: []
+    )
+
+    # Phase 4a fails too.
+    def slither_blows_up(*a, **k):
+        raise RuntimeError("slither binary not found")
+
+    monkeypatch.setattr(script_module, "run_slither", slither_blows_up)
+    monkeypatch.setattr(
+        script_module, "dispatch_risk_synthesis",
+        lambda *a, **k: {
+            "graph_id": "abc", "ok": True,
+            "reply": "[]", "error": None,
+        },
+    )
+
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "document_repo.py",
+            "--repo", "tests/fixtures/tier1_uniswap_v2",
+            "--vault", str(tmp_path),
+        ],
+    )
+
+    assert script_module.main() == 1, (
+        "hard topo failure must override Phase 4 advisory rc=2"
     )

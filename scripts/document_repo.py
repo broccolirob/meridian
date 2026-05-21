@@ -23,11 +23,17 @@ from src.agent import (  # noqa: E402
     DEFAULT_CONCURRENCY_CAP,
     DEFAULT_MODEL,
     dispatch_flows,
+    dispatch_risk_synthesis,
     dispatch_topo,
 )
+from src.analyzers.slither import run_slither  # noqa: E402
 from src.render.moc import write_root_moc  # noqa: E402
 from src.render.obsidian import ensure_vault  # noqa: E402
-from src.tools import trailmark_parse  # noqa: E402
+from src.tools import (  # noqa: E402
+    augment_sarif,
+    run_preanalysis,
+    trailmark_parse,
+)
 
 DEFAULT_REPO = "tests/fixtures/tier0_erc4626"
 DEFAULT_VAULT = ".washable/vaults/tier0"
@@ -51,22 +57,69 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    # rc=4 for setup errors keeps rc=2 free for the Phase 4
+    # advisory degradation path (analyzers skipped or
+    # RiskSynthesizer failed). CI consumers can then
+    # distinguish "nothing to ship — fix the setup" from
+    # "ship the partial vault, risk notes pending."
     if not os.environ.get("OPENAI_API_KEY"):
         print("ERROR: OPENAI_API_KEY not set", file=sys.stderr)
-        return 2
+        return 4
     if not Path(args.repo).is_dir():
         print(f"ERROR: not a directory: {args.repo}", file=sys.stderr)
-        return 2
+        return 4
 
-    print(f"[1/3] Parsing {args.repo}...")
+    print(f"Parsing {args.repo}...")
     graph_id = trailmark_parse(args.repo, language="solidity")
     print(f"      graph_id = {graph_id}")
 
     vault = ensure_vault(args.vault).resolve()
-    print(f"[2/3] Vault = {vault}")
+    print(f"Vault = {vault}")
 
+    # Phase 4a: analyzer pre-pass (slither → SARIF → augment →
+    # preanalysis). All-or-nothing: any failure skips Phase 4b
+    # (RiskSynthesizer) but allows the rest of the pipeline to
+    # continue. Auditor still gets node + flow notes; just no
+    # vault/risks/ folder. rc=2 (advisory) signals the
+    # degradation. Common cause of skip: slither binary missing.
+    sarif_path = vault / ".audit" / "slither.sarif"
+    phase4_ok = True
+    print("---")
+    print(f"Running Phase 4 analyzers (SARIF -> {sarif_path})...")
+    try:
+        # Defend against a regular file shadowing the .audit
+        # directory (e.g., from a confused prior run). mkdir
+        # would raise the cryptic FileExistsError [Errno 17];
+        # a concrete RuntimeError makes the cleanup obvious.
+        if (
+            sarif_path.parent.exists()
+            and not sarif_path.parent.is_dir()
+        ):
+            raise RuntimeError(
+                f"{sarif_path.parent} exists but is not a "
+                f"directory; remove the file and rerun"
+            )
+        sarif_path.parent.mkdir(parents=True, exist_ok=True)
+        run_slither(args.repo, sarif_path)
+        augment_sarif(graph_id, sarif_path)
+        run_preanalysis(graph_id)
+        print("      OK")
+    except Exception as e:
+        print(
+            f"      WARNING: Phase 4 analyzers failed: {e}",
+            file=sys.stderr,
+        )
+        print(
+            "      Skipping risk synthesis; continuing with node "
+            "+ flow notes.",
+            file=sys.stderr,
+        )
+        phase4_ok = False
+
+    print("---")
     print(
-        f"[3/3] Dispatching (cap={args.concurrency}, model={args.model})..."
+        f"Dispatching node notes (cap={args.concurrency}, "
+        f"model={args.model})..."
     )
 
     def _progress(i: int, n: int, nid: str) -> None:
@@ -112,6 +165,29 @@ def main() -> int:
     for f in flow_result["failures"]:
         print(f"  FAIL {f['node_id']}: {f['error']}")
 
+    # Phase 4b: RiskSynthesizer dispatch. Single-threaded;
+    # MUST run after NodeDocumenter + FlowTracer waves drain
+    # (RiskSynthesizer issues 15-45 annotate calls per
+    # invocation that would serialize on _ANNOTATE_LOCK with
+    # concurrent workers — see RISK_SYNTHESIZER_SUBAGENT
+    # description). Skip when Phase 4a was degraded.
+    risks_ok = True
+    if phase4_ok:
+        print("---")
+        print(f"Dispatching risk synthesis (model={args.model})...")
+        risk_result = dispatch_risk_synthesis(
+            graph_id, str(vault), model=args.model,
+        )
+        risks_ok = risk_result["ok"]
+        if risks_ok:
+            print("      OK")
+        else:
+            print(
+                f"      WARNING: risk synthesis failed: "
+                f"{risk_result.get('error', 'unknown')}",
+                file=sys.stderr,
+            )
+
     # Always try to write MOCs — even partial-success vaults benefit
     # from a navigable landing page. write_root_moc scans the
     # filesystem, so it only lists notes that actually shipped.
@@ -135,11 +211,20 @@ def main() -> int:
     else:
         print("  OK: no broken wikilinks")
 
-    # Nonzero on EITHER node OR flow failures. Phase 3 flow
-    # dispatch is part of the run — silent flow failures would
-    # leave CI green while shipping incomplete vaults.
+    # rc semantics:
+    #   0 = all phases clean
+    #   1 = hard failures in dispatch_topo or dispatch_flows
+    #       (silent topo/flow failures would leave CI green
+    #       while shipping incomplete vaults)
+    #   2 = advisory: Phase 4 degraded (analyzers skipped or
+    #       RiskSynthesizer failed) but core pipeline succeeded.
+    #       Vault has node + flow notes; just no risks/.
+    #   4 = setup error: missing api key or bad --repo path
+    #       (returned early above; no vault to ship).
     if result["failures"] or flow_result["failures"]:
         return 1
+    if not phase4_ok or not risks_ok:
+        return 2
     return 0
 
 

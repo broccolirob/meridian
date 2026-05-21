@@ -13,3 +13,9 @@ wheels/
 
 # washable runtime cache (graphs, file hashes, etc.)
 .washable/
+
+# Slither/crytic-compile incidental artifacts. run_slither uses
+# cwd=repo so SARIF URIs match the graph; crytic-export lands
+# in the repo as a side effect.
+crytic-export/
+crytic-compile.config.json

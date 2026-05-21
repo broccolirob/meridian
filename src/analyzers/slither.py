@@ -21,6 +21,7 @@ def run_slither(
     repo_path: str | Path,
     out_sarif: str | Path,
     *,
+    project_root: str | Path | None = None,
     timeout: float = _DEFAULT_TIMEOUT_S,
 ) -> Path:
     """Run `slither <repo> --sarif <out>` and return the SARIF
@@ -44,6 +45,15 @@ def run_slither(
     the SARIF file exists with non-zero size, the run is treated
     as successful.
 
+    `project_root` controls the subprocess cwd, which controls
+    how slither emits SARIF location URIs. Defaults to
+    `repo_path` itself. When the caller analyzes a subdirectory
+    of a larger project (e.g. `repo_path=foo/contracts`,
+    `project_root=foo`), set this explicitly so URIs come out
+    as `contracts/X.sol` rather than bare `X.sol` — that's the
+    shape `augment_sarif` (chunk 4.2) needs to match findings
+    against graph nodes parsed from `project_root`.
+
     Hardening invariants:
     - Pre-existing `out_sarif` is deleted before invocation, so
       a returned path always reflects THIS run (no stale-data
@@ -53,9 +63,29 @@ def run_slither(
       where the file is created but never populated; downstream
       `augment_sarif` would otherwise crash on a JSONDecodeError
       far from the root cause.
-    - subprocess.run uses `cwd=out.parent` so slither's
-      incidental artifacts (`crytic-export/`, `crytic-compile.config.json`)
-      land next to the SARIF, NOT in the auditor's working tree.
+    - subprocess.run uses `cwd=project_root` (default
+      `repo_path`) so slither's SARIF URIs are
+      project-relative. Trailmark's `augment_sarif` matches by
+      file+line and resolves URIs against the parsed graph's
+      paths — running slither outside the project produces
+      `../../../...` URIs that match nothing.
+    - `project_root`, when explicitly passed, MUST contain
+      `repo_path` (validated via Path.is_relative_to).
+      Mismatched roots are a silent footgun: slither runs OK,
+      but augment_sarif returns 0 matched because URIs compute
+      against the wrong base.
+
+    Side effect (worth knowing for production callers):
+    Slither's incidental artifacts (`crytic-export/`,
+    `crytic-compile.config.json`) land inside `cwd` — i.e.,
+    inside the auditor's input repo by default. This matches
+    stock slither behavior and is gitignored at washable's
+    root, but for auditors running against external repos
+    (git clones, submodules, read-only mounts) it leaves
+    untracked files in the audit target. For hermetic runs,
+    copy the target to a tmp dir first and pass the copy as
+    `repo_path` (this is what `tests/test_augment_sarif.py`'s
+    `fresh_tier1_with_sarif` fixture does).
 
     Security: subprocess uses list-form argv (no shell=True), so
     the auditor-supplied `repo_path` cannot inject shell
@@ -73,6 +103,23 @@ def run_slither(
     repo = Path(repo_path).resolve()
     if not repo.exists():
         raise FileNotFoundError(f"repo path does not exist: {repo}")
+    if project_root is not None:
+        cwd = Path(project_root).resolve()
+        if not cwd.exists():
+            raise FileNotFoundError(
+                f"project_root does not exist: {cwd}"
+            )
+        # Containment check: SARIF URIs are computed relative to
+        # `cwd`. If `repo` isn't inside `cwd`, the URIs come out
+        # as `../...` paths that Trailmark's augment_sarif can't
+        # resolve against the graph (silent 0-matched footgun).
+        if not repo.is_relative_to(cwd):
+            raise ValueError(
+                f"repo_path ({repo}) must be inside project_root "
+                f"({cwd}) so SARIF URIs resolve against the graph"
+            )
+    else:
+        cwd = repo
 
     out = Path(out_sarif).resolve()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -89,12 +136,15 @@ def run_slither(
         text=True,
         timeout=timeout,
         check=False,
-        # Slither writes crytic-export/ and crytic-compile.config.json
-        # relative to cwd. Landing them next to the SARIF (rather
-        # than the auditor's cwd) keeps the auditor's working tree
-        # clean. Build-config detection (foundry.toml, etc.) walks
-        # up from `repo`, not cwd, so this is safe.
-        cwd=str(out.parent),
+        # cwd controls SARIF URI shape. Defaults to repo_path;
+        # caller overrides via `project_root` when analyzing a
+        # subdir of a larger project so URIs are project-relative
+        # (chunk 4.2's augment_sarif needs that to match graph
+        # nodes). Running slither outside the project produces
+        # `../../../...` URIs that Trailmark can't match.
+        # Crytic-export artifacts land at `cwd`; this matches
+        # stock slither behavior and is gitignored.
+        cwd=str(cwd),
     )
 
     # File-existence + non-zero size is the success signal. A

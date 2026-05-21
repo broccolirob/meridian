@@ -264,6 +264,63 @@ def clear_annotations(
     return result
 
 
+def augment_sarif(
+    graph_id: str,
+    sarif_path: str | Path,
+    *,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> dict[str, Any]:
+    """Project SARIF findings onto the parsed graph.
+
+    Wraps Trailmark's `engine.augment_sarif()`: parses the SARIF
+    at `sarif_path`, matches each finding to a graph node by
+    file+line overlap, and persists the mutated engine. Returns
+    the matcher's result dict:
+
+        {
+            "matched_findings":   int,   # findings attached to nodes
+            "unmatched_findings": int,   # file/line didn't overlap any node
+            "subgraphs_created":  [str], # e.g., ["sarif:Slither", "sarif:warning"]
+        }
+
+    After this returns, `nodes_with_annotation(graph_id,
+    "finding")` surfaces the augmented nodes. RiskSynthesizer
+    (chunk 4.5) consumes that to populate `risks/hotspots.md`.
+
+    Raises:
+        FileNotFoundError: sarif_path doesn't exist.
+        ValueError: graph_id fails the 12-hex pattern check
+            (raised by load_graph's validator).
+
+    Concurrency: uses _ANNOTATE_LOCK + deepcopy + atomic
+    save_graph, same pattern as annotate(). Concurrent unlocked
+    readers iterating engine internals don't see partial state.
+
+    Note: trailmark's matcher is file+line-based. SARIF URIs
+    must resolve against the parsed graph's file paths — see
+    run_slither in src/analyzers/slither.py, which sets cwd=repo
+    so SARIF URIs are repo-relative. Findings whose locations
+    don't overlap any node land in `unmatched_findings`
+    (informational; not an error).
+    """
+    sarif = Path(sarif_path)
+    if not sarif.exists():
+        raise FileNotFoundError(
+            f"sarif_path does not exist: {sarif}"
+        )
+    with _ANNOTATE_LOCK:
+        # Deep-copy the cached instance before mutating. Same
+        # race-recovery story as annotate(): the mtime-aware
+        # lru_cache shares one QueryEngine across workers; in-
+        # place mutation would corrupt concurrent readers.
+        engine = copy.deepcopy(
+            load_graph(graph_id, cache_root=cache_root)
+        )
+        result = engine.augment_sarif(str(sarif))
+        save_graph(engine, graph_id, cache_root=cache_root)
+    return result
+
+
 # Cap on the requested line range for read_file_range. Defends
 # against attacker-supplied repos where a node's Trailmark-parsed
 # line range claims something absurd like start_line=1,

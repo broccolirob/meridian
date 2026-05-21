@@ -58,14 +58,22 @@ def test_run_slither_on_tier1_produces_sarif_with_findings(
     """Chunk 4.1 success criterion: running slither on Tier 1
     produces a valid SARIF file with at least one finding.
 
+    Copies the Tier 1 fixture to tmp_path before running slither
+    because run_slither uses cwd=repo to produce repo-relative
+    SARIF URIs (needed by chunk 4.2's augment_sarif matcher).
+    With cwd=repo, slither writes crytic-export/ into the repo;
+    copying to tmp avoids polluting the fixture.
+
     Uses SOLC_VERSION env var to scope the solc selection to
     THIS test's subprocess only — `solc-select use` would
     mutate ~/.solc-select/global-version persistently, silently
     changing the dev's solc setup across the test run."""
     monkeypatch.setenv("SOLC_VERSION", "0.5.16")
+    repo = tmp_path / "tier1"
+    shutil.copytree(TIER1_CONTRACTS.parent, repo)
 
     out = tmp_path / "tier1.sarif"
-    written = run_slither(TIER1_CONTRACTS, out, timeout=120.0)
+    written = run_slither(repo / "contracts", out, timeout=120.0)
 
     assert written == out.resolve()
     assert written.exists()

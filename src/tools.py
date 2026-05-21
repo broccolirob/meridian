@@ -321,6 +321,93 @@ def augment_sarif(
     return result
 
 
+def run_preanalysis(
+    graph_id: str,
+    *,
+    sample_size: int = 25,
+    cache_root: Annotated[Path, InjectedToolArg] = CACHE_ROOT,
+) -> dict[str, dict[str, Any]]:
+    """Run Trailmark's preanalysis passes and return subgraph metadata.
+
+    `engine.preanalysis()` computes blast radius, entrypoint
+    enumeration, privilege boundary crossings, and taint
+    propagation. The subgraphs are persisted to the cached
+    engine so subsequent LLM tool calls can query them without
+    re-running preanalysis.
+
+    Returns:
+        Dict mapping subgraph name to `{count, sample_ids}`:
+
+            {
+                "tainted": {
+                    "count": 80,
+                    "sample_ids": ["src.foo.Bar:Bar.baz", ...],
+                },
+                "high_blast_radius": {"count": 0, "sample_ids": []},
+                ...
+            }
+
+        Tier 1 typically yields: `tainted`, `entrypoints`,
+        `entrypoints:untrusted_external`, `entrypoint_reachable`,
+        `high_blast_radius`, `privilege_boundary`. The latter
+        two may have 0 nodes for codebases without obvious
+        boundary patterns; the subgraphs are still registered.
+
+    `sample_size` caps the IDs returned per subgraph (default
+    25 per the trailmark-structural skill's convention).
+    Must be >= 0. RiskSynthesizer (chunk 4.5) uses these IDs
+    to name specific nodes in risk notes without a follow-up
+    tool round-trip.
+
+    Return shape note: this surfaces ALL subgraphs registered
+    on the engine, NOT just the ones preanalysis() created.
+    If the caller previously ran `augment_sarif` (which
+    registers `sarif:Slither`, `sarif:warning`, etc.), those
+    subgraphs appear in the return dict too. The naming
+    convention is informative — preanalysis names are bare
+    (`tainted`, `entrypoints`); augmenter names are prefixed
+    (`sarif:*`, future `semgrep:*`). Filter by prefix at the
+    caller if a pure preanalysis view is needed.
+
+    Ordering note: run_preanalysis is intended as a
+    SETUP-PHASE one-shot, run BEFORE dispatch_topo begins
+    annotation work. _ANNOTATE_LOCK serializes preanalysis
+    against every annotate/clear_annotations/augment_sarif
+    call; on Tier 3 (thousands of nodes) preanalysis can take
+    seconds, and concurrent dispatch_topo workers would block
+    on the lock for that duration. Don't fire on-demand
+    preanalysis mid-dispatch.
+
+    Raises:
+        ValueError: graph_id fails the 12-hex pattern check
+            (via load_graph's validator), or `sample_size` is
+            negative.
+
+    Concurrency: uses _ANNOTATE_LOCK + deepcopy + atomic
+    save_graph, same as annotate() and augment_sarif().
+    """
+    if sample_size < 0:
+        raise ValueError(
+            f"sample_size must be >= 0 (got {sample_size})"
+        )
+    with _ANNOTATE_LOCK:
+        engine = copy.deepcopy(
+            load_graph(graph_id, cache_root=cache_root)
+        )
+        engine.preanalysis()
+        result: dict[str, dict[str, Any]] = {}
+        for name in engine.subgraph_names():
+            nodes = engine.subgraph(name)
+            result[name] = {
+                "count": len(nodes),
+                "sample_ids": [
+                    n["id"] for n in nodes[:sample_size]
+                ],
+            }
+        save_graph(engine, graph_id, cache_root=cache_root)
+    return result
+
+
 # Cap on the requested line range for read_file_range. Defends
 # against attacker-supplied repos where a node's Trailmark-parsed
 # line range claims something absurd like start_line=1,

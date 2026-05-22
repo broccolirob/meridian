@@ -226,8 +226,12 @@ def test_cli_diff_writes_note_with_path_args(
         "contract Extra { function ping() external pure {} }\n"
     )
     vault = tmp_path / "vault"
+    # Chunk 5.4: vault moved from positional to top-level
+    # --vault-path flag. Diff now takes only `before` +
+    # `after` positionals.
     rc = cli([
-        "diff", str(vault), str(before), str(after),
+        "--vault-path", str(vault),
+        "diff", str(before), str(after),
     ])
     assert rc == 0
     diff_files = list((vault / "diffs").glob("*.md"))
@@ -257,7 +261,8 @@ def test_cli_diff_accepts_graph_id_args(
     aid = trailmark_parse(str(after), language="solidity")
     try:
         vault = tmp_path / "vault"
-        rc = cli(["diff", str(vault), bid, aid])
+        # Chunk 5.4: --vault-path is top-level.
+        rc = cli(["--vault-path", str(vault), "diff", bid, aid])
         assert rc == 0
         diff_files = list((vault / "diffs").glob("*.md"))
         assert len(diff_files) == 1

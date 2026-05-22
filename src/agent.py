@@ -34,6 +34,11 @@ from typing import Any, Callable
 from deepagents import SubAgent, create_deep_agent
 from langchain_openai import ChatOpenAI
 
+from src.graph.cache import (
+    compute_file_hashes,
+    load_file_hash_cache,
+    save_file_hash_cache,
+)
 from src.graph.persist import _validate_graph_id, load_graph
 from src.graph.topo import topo_levels, topo_order
 from src.render.obsidian import (
@@ -51,6 +56,7 @@ from src.tools import (
     callees_of,
     clear_annotations_by_source,
     graph_summary,
+    list_nodes,
 )
 
 _log = logging.getLogger(__name__)
@@ -911,11 +917,41 @@ def dispatch_topo(
     levels = topo_levels(graph_id)
     order = [nid for level in levels for nid in level]
 
+    # File-hash incremental cache (chunk 5.3):
+    # 1. Map every node to its owning file via list_nodes.
+    # 2. Hash each unique file's current contents.
+    # 3. Compare to prior cache; nodes whose files are
+    #    unchanged from a previous successful run are
+    #    skipped.
+    # 4. After dispatch, record fresh hashes for files
+    #    whose dispatched nodes all succeeded (per-file
+    #    all-or-nothing). Files no longer in the graph
+    #    (deleted source) are pruned.
+    node_files: dict[str, str] = {
+        n["id"]: n["location"]["file_path"]
+        for n in list_nodes(graph_id)
+    }
+    ordered_files: set[str] = {
+        node_files[nid] for nid in order if nid in node_files
+    }
+    prior_cache = load_file_hash_cache(vault_path)
+    current_hashes = compute_file_hashes(ordered_files)
+    skip_set: set[str] = {
+        nid for nid in order
+        if (fp := node_files.get(nid)) is not None
+        and current_hashes.get(fp) is not None
+        and prior_cache.get(fp) == current_hashes[fp]
+    }
+    skipped: list[dict[str, Any]] = [
+        {"node_id": nid, "reason": "file unchanged"}
+        for nid in order if nid in skip_set
+    ]
+
     successes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
     record = _make_recorder(
         successes, failures,
-        total=len(order),
+        total=len(order) - len(skip_set),
         on_progress=on_progress,
     )
 
@@ -927,9 +963,17 @@ def dispatch_topo(
     # disk by the time the derived contract's NodeDocumenter
     # runs. (Reusing one `record` across levels keeps the
     # progress index 1..N rather than restarting per level.)
+    #
+    # Skipped nodes are filtered out per-level BEFORE
+    # _run_pool. An entire level may become empty if all its
+    # nodes are cached — skip the pool call entirely in
+    # that case.
     for level in levels:
+        pending = [nid for nid in level if nid not in skip_set]
+        if not pending:
+            continue
         _run_pool(
-            level,
+            pending,
             lambda nid: _invoke_one(agent, graph_id, nid),
             concurrency_cap=concurrency_cap,
             per_invoke_timeout=per_invoke_timeout,
@@ -937,11 +981,49 @@ def dispatch_topo(
             log_kind="dispatch",
         )
 
+    # Per-file all-or-nothing cache update. A file's hash is
+    # recorded only if NO node from that file failed during
+    # this dispatch. Files no longer in the graph (deleted
+    # source) are pruned. Files that were entirely skipped
+    # (all their nodes were cache-hits) keep their prior
+    # hash (re-recorded from current_hashes, which equals
+    # prior_cache for those files by construction).
+    failed_files: set[str] = {
+        node_files[f["node_id"]]
+        for f in failures
+        if f["node_id"] in node_files
+    }
+    new_cache: dict[str, str] = {
+        k: v for k, v in prior_cache.items() if k in ordered_files
+    }
+    for s in successes:
+        fp = node_files.get(s["node_id"])
+        # `fp in current_hashes` guard: a node CAN succeed
+        # even when its file wasn't hashable at dispatch
+        # start — e.g., the source file appeared between
+        # `compute_file_hashes` and NodeDocumenter's
+        # `read_node_source`. Without the guard, the index
+        # raises KeyError and aborts the whole cache-update
+        # path. The skipped-files loop below has the same
+        # guard for the symmetric reason.
+        if (
+            fp is not None
+            and fp not in failed_files
+            and fp in current_hashes
+        ):
+            new_cache[fp] = current_hashes[fp]
+    for nid in skip_set:
+        fp = node_files.get(nid)
+        if fp is not None and fp in current_hashes:
+            new_cache[fp] = current_hashes[fp]
+    save_file_hash_cache(vault_path, new_cache)
+
     return {
         "graph_id": graph_id,
         "node_count": len(order),
         "successes": successes,
         "failures": failures,
+        "skipped": skipped,
         "order": order,
     }
 

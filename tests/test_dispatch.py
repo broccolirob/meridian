@@ -29,13 +29,15 @@ class _FakeAgent:
         return {"messages": [reply]}
 
 
-def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id_default_cache):
+def test_dispatch_walks_every_node(
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
+):
     """All documentable Tier 0 nodes get exactly one agent invocation."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
-    result = dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
+    result = dispatch_topo(gid, str(tmp_path / "vault"), concurrency_cap=1)
 
     assert result["node_count"] == 8
     assert len(result["successes"]) == 8
@@ -44,7 +46,7 @@ def test_dispatch_walks_every_node(monkeypatch, tier0_graph_id_default_cache):
 
 
 def test_dispatch_includes_node_id_in_task(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """Task message uses the "Document the node `<id>`" verb the
     main prompt steers on. Also coupling armor — if the template
@@ -54,7 +56,7 @@ def test_dispatch_includes_node_id_in_task(
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
-    dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
+    dispatch_topo(gid, str(tmp_path / "vault"), concurrency_cap=1)
 
     assert any("Document the node" in c for c in fake.calls)
     assert any("src.tokens.ERC20:ERC20" in c for c in fake.calls)
@@ -64,14 +66,14 @@ def test_dispatch_includes_node_id_in_task(
 
 
 def test_dispatch_continues_past_failures(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """One node failing must not block the rest."""
     gid = tier0_graph_id_default_cache
     fake = _FakeAgent(fail_for={"src.tokens.ERC20:ERC20"})
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
-    result = dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
+    result = dispatch_topo(gid, str(tmp_path / "vault"), concurrency_cap=1)
 
     assert len(result["failures"]) == 1
     assert result["failures"][0]["node_id"] == "src.tokens.ERC20:ERC20"
@@ -85,7 +87,7 @@ def test_dispatch_respects_concurrency_cap_default():
 
 
 def test_dispatch_rejects_zero_or_negative_cap(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     gid = tier0_graph_id_default_cache
     monkeypatch.setattr(
@@ -95,13 +97,13 @@ def test_dispatch_rejects_zero_or_negative_cap(
         with pytest.raises(ValueError, match="concurrency_cap must be"):
             dispatch_topo(
                 gid,
-                "/tmp/fake-vault",
+                str(tmp_path / "vault"),
                 concurrency_cap=bad,
             )
 
 
 def test_dispatch_order_field_matches_topo_order(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """The returned `order` field IS the topo order, for replay/debug."""
     from src.graph.topo import topo_order
@@ -111,7 +113,7 @@ def test_dispatch_order_field_matches_topo_order(
     fake = _FakeAgent()
     monkeypatch.setattr("src.agent.build_agent", lambda *a, **k: fake)
 
-    result = dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=1)
+    result = dispatch_topo(gid, str(tmp_path / "vault"), concurrency_cap=1)
 
     assert result["order"] == expected
 
@@ -138,7 +140,7 @@ class _HangingAgent:
 
 
 def test_dispatch_per_invoke_timeout_records_failure(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """A hung LLM call must NOT block the orchestrator. After
     per_invoke_timeout seconds the future is recorded as a
@@ -153,7 +155,7 @@ def test_dispatch_per_invoke_timeout_records_failure(
     try:
         result = dispatch_topo(
             gid,
-            "/tmp/fake-vault",
+            str(tmp_path / "vault"),
             concurrency_cap=2,
             per_invoke_timeout=0.3,
         )
@@ -173,7 +175,7 @@ def test_dispatch_per_invoke_timeout_records_failure(
 
 
 def test_dispatch_rejects_zero_or_negative_per_invoke_timeout(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     gid = tier0_graph_id_default_cache
     monkeypatch.setattr(
@@ -183,7 +185,7 @@ def test_dispatch_rejects_zero_or_negative_per_invoke_timeout(
         with pytest.raises(ValueError, match="per_invoke_timeout"):
             dispatch_topo(
                 gid,
-                "/tmp/fake-vault",
+                str(tmp_path / "vault"),
                 concurrency_cap=1,
                 per_invoke_timeout=bad,
             )
@@ -236,7 +238,7 @@ def test_invoke_one_accepts_real_trailmark_ids():
 
 
 def test_dispatch_continues_when_on_progress_callback_raises(
-    monkeypatch, tier0_graph_id_default_cache, caplog
+    monkeypatch, tier0_graph_id_default_cache, caplog, tmp_path
 ):
     """A broken on_progress callback must NOT abort the dispatch
     run. The gather loop catches on_done exceptions, logs them
@@ -260,7 +262,7 @@ def test_dispatch_continues_when_on_progress_callback_raises(
     caplog.set_level(logging.WARNING, logger="src.agent")
     result = dispatch_topo(
         gid,
-        "/tmp/fake-vault",
+        str(tmp_path / "vault"),
         concurrency_cap=1,
         on_progress=broken_callback,
     )
@@ -634,7 +636,7 @@ def test_build_agent_validates_vault_path(monkeypatch):
 
 
 def test_dispatch_topo_completes_level_before_next_starts(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """dispatch_topo's architectural invariant: `_run_pool`
     is called once per topological level, in level order,
@@ -680,7 +682,7 @@ def test_dispatch_topo_completes_level_before_next_starts(
         "src.agent.build_agent", lambda *a, **k: object()
     )
 
-    dispatch_topo(gid, "/tmp/fake-vault", concurrency_cap=5)
+    dispatch_topo(gid, str(tmp_path / "vault"), concurrency_cap=5)
 
     # Exactly one _run_pool call per topological level, in
     # level order, with that level's items.
@@ -693,7 +695,7 @@ def test_dispatch_topo_completes_level_before_next_starts(
 
 
 def test_dispatch_topo_on_progress_callback_contract(
-    monkeypatch, tier0_graph_id_default_cache
+    monkeypatch, tier0_graph_id_default_cache, tmp_path
 ):
     """Pin the on_progress callback contract.
 
@@ -721,7 +723,7 @@ def test_dispatch_topo_on_progress_callback_contract(
 
     result = dispatch_topo(
         gid,
-        "/tmp/fake-vault",
+        str(tmp_path / "vault"),
         concurrency_cap=5,
         on_progress=track,
     )

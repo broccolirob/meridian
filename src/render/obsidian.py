@@ -38,6 +38,7 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "diagrams",
     "attack-surface",
     "risks",
+    "diffs",
 )
 
 # Threshold for sweeping atomic-write tmp file orphans. 1

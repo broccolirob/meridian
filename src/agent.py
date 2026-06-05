@@ -45,6 +45,7 @@ from src.render.obsidian import (
     render_and_write_flow_note,
     render_and_write_node_note,
     render_and_write_risk_note,
+    resolve_wikilink,
 )
 from src.subagents import (
     FLOW_TRACER_SUBAGENT,
@@ -300,6 +301,32 @@ def _wrap_subagent_writers(
             observations,
         )
 
+    def _safe_resolve_wikilink(
+        graph_id: str,
+        node_id: str,
+    ) -> str:
+        """LLM-safe wrapper: the raw `resolve_wikilink` raises
+        KeyError when `node_id` (or a method's parent) isn't in
+        the graph. An uncaught raise inside a tool call kills
+        the entire agent dispatch via langgraph. Convert the
+        miss to a tool-result string the LLM can read and
+        recover from (e.g., the LLM saw a method id in callees
+        that isn't materialized as a graph node).
+
+        Internal Python callers (e.g. `render_and_write_risk_note`)
+        continue to import and call the raw `resolve_wikilink`
+        and catch KeyError themselves — that path applies its
+        own defang policy to the fallback string and must not
+        be short-circuited."""
+        try:
+            return resolve_wikilink(graph_id, node_id)
+        except KeyError:
+            return (
+                f"resolve_wikilink: node_id {node_id!r} not in "
+                f"graph. Use list_nodes() to see valid ids, or "
+                f"skip this reference."
+            )
+
     # Match the LLM-visible tool name to the original. We can't
     # use functools.wraps because that would copy the full signature
     # back in (including vault_path), defeating the fix.
@@ -309,6 +336,8 @@ def _wrap_subagent_writers(
     _safe_write_flow_note.__doc__ = render_and_write_flow_note.__doc__
     _safe_write_risk_note.__name__ = render_and_write_risk_note.__name__
     _safe_write_risk_note.__doc__ = render_and_write_risk_note.__doc__
+    _safe_resolve_wikilink.__name__ = resolve_wikilink.__name__
+    _safe_resolve_wikilink.__doc__ = resolve_wikilink.__doc__
 
     def _replace_writer(t: Any) -> Any:
         if t is render_and_write_node_note:
@@ -317,6 +346,8 @@ def _wrap_subagent_writers(
             return _safe_write_flow_note
         if t is render_and_write_risk_note:
             return _safe_write_risk_note
+        if t is resolve_wikilink:
+            return _safe_resolve_wikilink
         return t
 
     wrapped: SubAgent = {

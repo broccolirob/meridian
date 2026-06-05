@@ -504,6 +504,12 @@ def _render_events_etc(node: dict[str, Any]) -> str:
 
 def _render_annotations(graph_ctx: dict[str, Any]) -> str:
     annotations = graph_ctx.get("annotations") or []
+    # graph_ctx is LLM-supplied — gpt-5-mini has been observed
+    # passing bare strings instead of `{kind, description, source}`
+    # dicts. Drop non-dict entries rather than crashing; the
+    # renderer's contract is "never raise on adversarial input"
+    # (same posture as the link-list defang in rounds 14-17).
+    annotations = [a for a in annotations if isinstance(a, dict)]
     # Findings (kind="finding") are owned by the Risks section
     # — `_render_risks` pulls them from the graph via
     # `annotations_of(kind="finding")`. Filter them out here
@@ -891,6 +897,12 @@ def _build_frontmatter(
     }
     for key in ("inherits", "implements", "uses"):
         wikilinks = graph_ctx.get(key) or []
+        # graph_ctx is LLM-supplied — gpt-5-mini has been observed
+        # nesting lists (`[["[[a]]", "[[b]]"]]`) instead of a flat
+        # `list[str]`. Drop non-string entries rather than crashing;
+        # same posture as `_render_annotations` and the link-list
+        # defang.
+        wikilinks = [w for w in wikilinks if isinstance(w, str)]
         if wikilinks:
             fm[key] = [_bare_name_from_wikilink(w) for w in wikilinks]
     return fm

@@ -141,8 +141,9 @@ producer instead of slither.
 
 - **Phases 0-4:** complete. Foundations, single-node MVP, main
   agent + topo walk, flow notes + Mermaid, risk pass + SARIF.
-- **Phase 5:** in progress. Diff mode + CLI polish (5.1-5.4 done;
-  5.5 = this README; 5.6 = optional Canvas export).
+- **Phase 5:** complete. Diff mode, file-hash incremental cache,
+  CLI polish (parse/diff/validate), this README, Obsidian Canvas
+  export.
 - **Threat model:** designed for accountable inputs — customer
   audits, vetted bounty targets. Running against unaccountable
   code (random GitHub clones) requires sandboxing; see

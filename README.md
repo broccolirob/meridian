@@ -1,4 +1,4 @@
-# washable
+# meridian
 
 > Turn any codebase into an audit-ready Obsidian vault. Trailmark
 > provides the graph; deepagents provide the narrative.
@@ -34,8 +34,8 @@ Requirements:
 Clone and run against the bundled Tier 1 fixture (Uniswap V2):
 
 ```bash
-git clone https://github.com/<your-org>/washable.git
-cd washable
+git clone https://github.com/<your-org>/meridian.git
+cd meridian
 uv sync
 cp .env.example .env
 # edit .env to set OPENAI_API_KEY
@@ -44,14 +44,14 @@ cp .env.example .env
 # nodes → trace flows → synthesize risks → write MOC → validate.
 uv run python scripts/document_repo.py \
     --repo tests/fixtures/tier1_uniswap_v2 \
-    --vault .washable/vaults/quickstart
+    --vault .meridian/vaults/quickstart
 ```
 
 After ~2-5 minutes (model latency dominates), open the vault in
 Obsidian:
 
 ```bash
-open -a Obsidian .washable/vaults/quickstart
+open -a Obsidian .meridian/vaults/quickstart
 ```
 
 You should see three contract notes (`UniswapV2Factory`,
@@ -60,7 +60,7 @@ risk notes under `risks/`, and a root `README.md` MOC linking
 everything.
 
 > **Note on the CLI:** the one-command orchestrator above lives in
-> `scripts/document_repo.py` today. The polished `washable`
+> `scripts/document_repo.py` today. The polished `meridian`
 > console-script (chunk 5.4) exposes `parse`, `diff`, and
 > `validate` subcommands but doesn't yet wrap orchestration as a
 > single `run` command. That's coming in a future chunk; the
@@ -76,7 +76,7 @@ everything.
 ├── flows/                 Per-entrypoint call-chain narratives
 ├── attack-surface/        Entrypoints ranked by trust + asset value
 ├── risks/                 Hotspots, delegatecall sites, reentrancy
-├── diffs/                 (washable diff output)
+├── diffs/                 (meridian diff output)
 └── diagrams/              Inheritance + call-graph Mermaid blocks
 ```
 
@@ -101,25 +101,25 @@ note as rendered in Obsidian's default theme.
 
 ## CLI
 
-The `washable` console-script exposes three subcommands today:
+The `meridian` console-script exposes three subcommands today:
 
 ```bash
-uv run washable --help                          # list subcommands
-uv run washable parse <repo>                    # cache a parsed graph
-uv run washable diff <before> <after>           # write a diff note
-uv run washable validate                        # check vault wikilinks
+uv run meridian --help                          # list subcommands
+uv run meridian parse <repo>                    # cache a parsed graph
+uv run meridian diff <before> <after>           # write a diff note
+uv run meridian validate                        # check vault wikilinks
 ```
 
 Both `diff` and `validate` need `--vault-path PATH` at the top level:
 
 ```bash
-uv run washable --vault-path ./my-vault validate
-uv run washable --vault-path ./my-vault diff <bid> <aid>
+uv run meridian --vault-path ./my-vault validate
+uv run meridian --vault-path ./my-vault diff <bid> <aid>
 ```
 
 The full repo→vault orchestration is `scripts/document_repo.py`
 (see [Quickstart](#quickstart) above). A future chunk wraps it as
-`washable run`.
+`meridian run`.
 
 ## Setup notes
 
@@ -132,7 +132,7 @@ solc-select install 0.5.16
 solc-select use 0.5.16
 ```
 
-**Other languages:** `washable parse` accepts `--language` (default
+**Other languages:** `meridian parse` accepts `--language` (default
 `auto`). Trailmark supports 21+ languages; for non-Solidity targets,
 use `run_semgrep` from `src/analyzers/semgrep.py` as the SARIF
 producer instead of slither.

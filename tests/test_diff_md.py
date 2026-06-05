@@ -246,7 +246,7 @@ def test_cli_diff_accepts_graph_id_args(
     """CLI accepts 12-hex graph_id args for before + after
     when graphs are pre-parsed into the default cache.
 
-    Uses the default `.washable/graph/` cache (no explicit
+    Uses the default `.meridian/graph/` cache (no explicit
     cache_root override at CLI layer in 5.2). Cleans up after
     itself so the test doesn't leak state across runs."""
     before, after, _cache_unused = tier1_before_after
@@ -269,7 +269,7 @@ def test_cli_diff_accepts_graph_id_args(
         assert diff_files[0].name == f"{bid[:8]}-{aid[:8]}.md"
     finally:
         # Best-effort cache cleanup — default cache lives at
-        # .washable/graph/<gid>/ relative to cwd.
+        # .meridian/graph/<gid>/ relative to cwd.
         from src.graph.persist import CACHE_ROOT
         for gid in (bid, aid):
             shutil.rmtree(

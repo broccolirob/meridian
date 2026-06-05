@@ -34,7 +34,7 @@ from src.graph.persist import (
 #
 # Atomic writes in save_graph fixed the partial-read race but
 # not lost-update. Cross-process locking (fcntl.flock) is
-# parked — washable runs in one Python process; multi-process
+# parked — meridian runs in one Python process; multi-process
 # is a future concern.
 _ANNOTATE_LOCK = threading.Lock()
 

@@ -56,7 +56,7 @@ def _render_root_moc_body(
 ) -> str:
     total_notes = sum(len(ns) for ns in populated.values())
     lines = [
-        "# washable vault",
+        "# meridian vault",
         "",
         (
             f"Generated documentation for a parsed codebase. "
@@ -116,7 +116,7 @@ def write_root_moc(
     root_fm = {
         "type": "moc",
         "graph_id": graph_id,
-        "generated_by": "washable",
+        "generated_by": "meridian",
     }
     root_path = write_obsidian_note(
         vault,

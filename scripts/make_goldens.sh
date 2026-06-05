@@ -12,15 +12,15 @@ cd "$ROOT"
 mkdir -p tests/golden
 
 # Start from a clean vault so each note is freshly written
-rm -rf .washable/vaults/tier0
+rm -rf .meridian/vaults/tier0
 
 echo "[1/2] ERC4626 contract..."
 uv run python scripts/document_one_node.py src.tokens.ERC4626:ERC4626
-cp .washable/vaults/tier0/contracts/ERC4626.md tests/golden/ERC4626.md
+cp .meridian/vaults/tier0/contracts/ERC4626.md tests/golden/ERC4626.md
 
 echo "[2/2] FixedPointMathLib library..."
 uv run python scripts/document_one_node.py src.utils.FixedPointMathLib:FixedPointMathLib
-cp .washable/vaults/tier0/libraries/FixedPointMathLib.md tests/golden/FixedPointMathLib.md
+cp .meridian/vaults/tier0/libraries/FixedPointMathLib.md tests/golden/FixedPointMathLib.md
 
 echo ""
 echo "Goldens written:"

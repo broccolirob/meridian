@@ -11,7 +11,7 @@ Example:
     uv run python scripts/trace_one_flow.py \\
         contracts.UniswapV2Pair:UniswapV2Pair.swap \\
         --repo tests/fixtures/tier1_uniswap_v2 \\
-        --vault .washable/vaults/tier1
+        --vault .meridian/vaults/tier1
 """
 
 import argparse
@@ -35,7 +35,7 @@ from src.render.obsidian import ensure_vault  # noqa: E402
 from src.tools import attack_surface, get_node, trailmark_parse  # noqa: E402
 
 DEFAULT_REPO = "tests/fixtures/tier1_uniswap_v2"
-DEFAULT_VAULT = ".washable/vaults/tier1"
+DEFAULT_VAULT = ".meridian/vaults/tier1"
 DEFAULT_ENTRY = "contracts.UniswapV2Pair:UniswapV2Pair.swap"
 
 

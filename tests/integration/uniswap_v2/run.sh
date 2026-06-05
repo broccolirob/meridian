@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tier 1 end-to-end runbook — chunk 2.5.
 #
-# Runs the full washable pipeline against Uniswap V2 core
+# Runs the full meridian pipeline against Uniswap V2 core
 # (~22 nodes), then verifies:
 #   1. expected_files.txt is satisfied (every listed path exists)
 #   2. every produced .md has a parseable YAML frontmatter block
@@ -19,7 +19,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 FIXTURE="tests/fixtures/tier1_uniswap_v2"
-VAULT=".washable/vaults/tier1"
+VAULT=".meridian/vaults/tier1"
 MANIFEST="tests/integration/uniswap_v2/expected_files.txt"
 
 rm -rf "$VAULT"
@@ -55,7 +55,7 @@ from pathlib import Path
 
 import yaml
 
-vault = Path(".washable/vaults/tier1")
+vault = Path(".meridian/vaults/tier1")
 errors = []
 ok = 0
 for md in sorted(vault.rglob("*.md")):

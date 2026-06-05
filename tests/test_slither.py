@@ -367,7 +367,7 @@ def test_run_slither_ignores_repo_local_config_file(
     repo.mkdir()
     # Attacker drops a malicious config trying to write an
     # extra JSON report at /tmp/exfil.json.
-    exfil_path = "/tmp/washable-slither-exfil-test.json"
+    exfil_path = "/tmp/meridian-slither-exfil-test.json"
     (repo / "slither.config.json").write_text(
         f'{{"json": "{exfil_path}"}}'
     )

@@ -1,4 +1,4 @@
-"""Main agent — the washable orchestrator.
+"""Main agent — the meridian orchestrator.
 
 Walks a parsed graph's topological order, dispatches NodeDocumenter
 per node, then enumerates entrypoints and dispatches FlowTracer per
@@ -88,7 +88,7 @@ _REQUEST_TIMEOUT_BUFFER = 60.0
 
 def _build_system_prompt(graph_id: str, vault_path: str | Path) -> str:
     return f"""\
-You are the washable orchestrator. Your job: document an entire parsed
+You are the meridian orchestrator. Your job: document an entire parsed
 codebase by walking its dependency graph and dispatching specialist
 subagents in the correct order.
 
@@ -364,7 +364,7 @@ def build_agent(
     model: str = DEFAULT_MODEL,
     request_timeout: float = DEFAULT_PER_INVOKE_TIMEOUT - _REQUEST_TIMEOUT_BUFFER,
 ) -> Any:
-    """Build the washable main agent.
+    """Build the meridian main agent.
 
     `graph_id` is the 12-hex graph identifier from `trailmark_parse`.
     `vault_path` should be an absolute path (callers typically use
@@ -875,7 +875,7 @@ def dispatch_topo(
     Per-node exceptions are caught and recorded in `failures`; the
     loop never aborts mid-walk.
 
-    Cache root: ALWAYS the default `.washable/graph/`. We don't
+    Cache root: ALWAYS the default `.meridian/graph/`. We don't
     expose an override because subagent tools (get_node, callers_of,
     annotate, etc.) bind their `cache_root` default at module-import
     time on the LLM agent's tool list — there's no clean way to
@@ -1098,7 +1098,7 @@ def dispatch_flows(
     the loop never aborts mid-walk. Mirrors `dispatch_topo`'s shape
     so a future orchestrator can compose both passes.
 
-    Cache root: ALWAYS the default `.washable/graph/` (same
+    Cache root: ALWAYS the default `.meridian/graph/` (same
     constraint as `dispatch_topo` — subagent tools bind their
     cache_root default at module-import time on the LLM tool list).
 

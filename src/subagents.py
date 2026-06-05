@@ -1,4 +1,4 @@
-"""Subagent definitions for washable.
+"""Subagent definitions for meridian.
 
 Each subagent is a deepagents.SubAgent TypedDict — instantiated by
 the main agent via `subagents=[...]` in create_deep_agent.

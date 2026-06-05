@@ -1,6 +1,6 @@
 """End-to-end smoke for Phase 0.
 
-Parses a Solidity directory through the full washable tool stack
+Parses a Solidity directory through the full meridian tool stack
 (`trailmark_parse` -> `list_nodes` -> `callers_of`/`callees_of`) and
 emits a JSON manifest of every node with caller/callee counts.
 

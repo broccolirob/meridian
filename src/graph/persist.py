@@ -8,7 +8,7 @@ from pathlib import Path
 
 from trailmark.query.api import QueryEngine
 
-CACHE_ROOT = Path(".washable/graph")
+CACHE_ROOT = Path(".meridian/graph")
 
 # Module-level lock that serializes _load_graph_cached
 # invocations. CPython's lru_cache is thread-safe for the
@@ -21,7 +21,7 @@ CACHE_ROOT = Path(".washable/graph")
 # callers receive the same cached instance.
 #
 # Cost: hit lookups also acquire the lock, but hits run in
-# microseconds — contention is negligible at washable's
+# microseconds — contention is negligible at meridian's
 # typical concurrency (cap=5 workers, ~100 load_graph calls
 # per dispatch). The thundering-herd fix saves 4×pickle.load
 # of wasted I/O on a cold cache.

@@ -1,6 +1,6 @@
 # Tier 0 — solmate ERC4626 smoke fixture
 
-Single-contract smoke test for washable's parsing layer.
+Single-contract smoke test for meridian's parsing layer.
 
 - **Upstream:** https://github.com/transmissions11/solmate
 - **Commit:** `89365b880c4f`

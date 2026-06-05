@@ -1,6 +1,6 @@
 # Test fixtures
 
-Vendored Solidity codebases washable parses, analyzes, and renders as
+Vendored Solidity codebases meridian parses, analyzes, and renders as
 Obsidian notes during testing.
 
 All fixtures come from pinned upstream commits, fetched by

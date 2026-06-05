@@ -2,7 +2,7 @@
 
 Used by:
   - `scripts/validate_vault.py` — the standalone CLI script.
-  - `main.py::_cmd_validate` — the `washable validate`
+  - `main.py::_cmd_validate` — the `meridian validate`
     subcommand (chunk 5.4).
 
 Lives in `src/` rather than `scripts/` so it ships in the

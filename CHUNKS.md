@@ -1,4 +1,4 @@
-# washable — Build Chunks
+# meridian — Build Chunks
 
 Implementation chunks derived from `PLAN.md`. Each chunk is scoped to fit in
 one focused Claude session without context-overflow or hallucination risk:
@@ -418,7 +418,7 @@ Conventions used by every chunk:
 
 ### 5.2 — CLI subcommand: diff
 
-- **Deliverable:** `washable diff <vault> <new-commit>` parses both
+- **Deliverable:** `meridian diff <vault> <new-commit>` parses both
   states and writes `vault/diffs/<short-sha>.md`.
 - **Files:** `main.py` (CLI entry), `src/render/diff_md.py`.
 - **Success:** Running against two Tier 1 snapshots produces a diff
@@ -427,7 +427,7 @@ Conventions used by every chunk:
 
 ### 5.3 — File-hash incremental cache
 
-- **Deliverable:** `.washable/cache/files.json` mapping file path →
+- **Deliverable:** `.meridian/cache/files.json` mapping file path →
   content hash. Subagent dispatch skips nodes whose owning files'
   hashes are unchanged from the last successful run.
 - **Files:** `src/graph/cache.py`, `src/agent.py`,
@@ -438,18 +438,18 @@ Conventions used by every chunk:
 
 ### 5.4 — CLI polish
 
-- **Deliverable:** `main.py` exposes `washable parse`, `washable diff`,
-  `washable validate`, plus `--version`, `--help`, and a `--vault-path`
-  flag. Pyproject `[project.scripts]` wires `washable = "main:cli"`.
+- **Deliverable:** `main.py` exposes `meridian parse`, `meridian diff`,
+  `meridian validate`, plus `--version`, `--help`, and a `--vault-path`
+  flag. Pyproject `[project.scripts]` wires `meridian = "main:cli"`.
 - **Files:** `main.py`, `pyproject.toml`.
-- **Success:** `uv run washable --help` prints all subcommands; `uvx
-  --from . washable --version` prints the project version.
+- **Success:** `uv run meridian --help` prints all subcommands; `uvx
+  --from . meridian --version` prints the project version.
 - **Deps:** 5.2.
 
 ### 5.5 — README + quickstart
 
 - **Deliverable:** `README.md` with one-paragraph pitch, quickstart
-  (`uvx washable <repo> <vault>`), and a screenshot of an Obsidian note.
+  (`uvx meridian <repo> <vault>`), and a screenshot of an Obsidian note.
 - **Files:** `README.md`, `docs/screenshot-note.png`.
 - **Success:** A reader following the quickstart against Tier 1
   produces a vault.

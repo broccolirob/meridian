@@ -3,7 +3,7 @@
 Ported from Trail of Bits' diagramming-code skill at
 `~/.claude/plugins/cache/trailofbits/trailmark/0.8.1/skills/
 diagramming-code/`. The bucket thresholds and color values match
-the skill's defaults verbatim so washable diagrams stay visually
+the skill's defaults verbatim so meridian diagrams stay visually
 consistent with ToB's existing tooling.
 """
 

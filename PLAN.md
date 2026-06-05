@@ -1,4 +1,4 @@
-# washable — Code Atlas
+# meridian — Code Atlas
 
 A deepagent that turns any codebase into an audit-ready Obsidian vault.
 Trailmark provides the graph. deepagents provide the narrative and synthesis.
@@ -10,7 +10,7 @@ First-class target: Solidity. Designed-in target: any language Trailmark parses
 A CLI:
 
 ```
-washable <repo-path-or-url> <vault-path>
+meridian <repo-path-or-url> <vault-path>
 ```
 
 Output is a **code atlas**: an Obsidian vault with one note per code unit
@@ -167,7 +167,7 @@ annotations:
 ```python
 # --- Trailmark wrappers ---
 def trailmark_parse(repo_path: str, language: str = "auto") -> str
-    # parse + persist QueryEngine to disk under .washable/graph/, return graph_id
+    # parse + persist QueryEngine to disk under .meridian/graph/, return graph_id
 
 def graph_summary(graph_id: str) -> dict
 def list_nodes(graph_id: str, kind: str | None = None) -> list[dict]
@@ -277,7 +277,7 @@ Built with `deepagents.create_deep_agent`. Instructions in plain English:
 - Add `trailmark`, `slither-analyzer` (optional in Phase 4) to `pyproject.toml`.
 - Build `trailmark_parse`, `graph_summary`, `list_nodes`, `get_node`,
   `callers_of`, `callees_of`.
-- Persist `QueryEngine` to disk under `.washable/graph/<repo-hash>/`.
+- Persist `QueryEngine` to disk under `.meridian/graph/<repo-hash>/`.
 - Build `ensure_vault`, `write_obsidian_note` with frontmatter + body
   templating.
 - Smoke test: parse `solmate/ERC4626.sol`, dump a JSON manifest of nodes.
@@ -316,8 +316,8 @@ Built with `deepagents.create_deep_agent`. Instructions in plain English:
 ### Phase 5 — Diff mode + polish
 
 - Build `diff_graphs` wrapper. Incorporate `graph-evolution` patterns.
-- Add `washable diff <vault> <new-commit>` to render attack-surface deltas.
-- CLI polish via `uv run washable` / `uvx washable`.
+- Add `meridian diff <vault> <new-commit>` to render attack-surface deltas.
+- CLI polish via `uv run meridian` / `uvx meridian`.
 - Incremental: hash files, skip unchanged node subgraphs.
 - Pretty Obsidian Canvas file for the inheritance + call graph?
 
@@ -339,7 +339,7 @@ Built with `deepagents.create_deep_agent`. Instructions in plain English:
 ## Repository layout (target)
 
 ```
-washable/
+meridian/
 ├── PLAN.md                     # this file
 ├── README.md
 ├── pyproject.toml

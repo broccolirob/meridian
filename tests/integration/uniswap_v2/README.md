@@ -4,7 +4,7 @@ End-to-end runbook for Phase 2 — chunk 2.5.
 
 ## What it does
 
-Runs the full washable pipeline against the Uniswap V2 core fixture:
+Runs the full meridian pipeline against the Uniswap V2 core fixture:
 parse → topological order → dispatch NodeDocumenter per node → write
 MOCs. Then validates every expected file exists and every frontmatter
 parses.

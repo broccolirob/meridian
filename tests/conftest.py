@@ -45,7 +45,7 @@ def tier1_graph_id(tier1_dir, tmp_path_factory):
 
 @pytest.fixture(scope="session")
 def tier0_graph_id_default_cache(tier0_dir):
-    """Parse Tier 0 into the DEFAULT cache (`.washable/graph/`).
+    """Parse Tier 0 into the DEFAULT cache (`.meridian/graph/`).
 
     dispatch_topo and the subagent's tool surface all read from the
     default cache — there is no cache_root threading through the
@@ -62,7 +62,7 @@ def tier0_graph_id_default_cache(tier0_dir):
     tmp_path) for any test that mutates the graph.
 
     Lifecycle:
-      1. Pre-wipe `.washable/graph/<gid>/` so prior-session
+      1. Pre-wipe `.meridian/graph/<gid>/` so prior-session
          crashes can't leak stale state into this run.
       2. Parse fresh via `trailmark_parse` — writes engine.pkl.
       3. Yield gid for the session.

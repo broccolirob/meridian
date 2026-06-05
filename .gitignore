@@ -11,8 +11,8 @@ wheels/
 
 .env
 
-# washable runtime cache (graphs, file hashes, etc.)
-.washable/
+# meridian runtime cache (graphs, file hashes, etc.)
+.meridian/
 
 # Slither/crytic-compile incidental artifacts. run_slither uses
 # cwd=repo so SARIF URIs match the graph; crytic-export lands

@@ -4,7 +4,7 @@ After a successful run, the cache records the SHA-256 of
 each source file whose nodes were dispatched. On the next
 run, nodes whose files match the recorded hash are skipped.
 
-Cache lives at `<vault>/.washable/cache/files.json`. Vault-
+Cache lives at `<vault>/.meridian/cache/files.json`. Vault-
 scoped so each vault tracks its own work; deleting the
 vault wipes the cache atomically.
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 # Relative to the vault root. Atomic-write tmp lands in the
 # same directory so `os.replace` is filesystem-local.
-_CACHE_REL_PATH = Path(".washable/cache/files.json")
+_CACHE_REL_PATH = Path(".meridian/cache/files.json")
 
 
 def _cache_path(vault_path: str | Path) -> Path:
@@ -63,7 +63,7 @@ def compute_file_hashes(
 
 
 def load_file_hash_cache(vault_path: str | Path) -> dict[str, str]:
-    """Read `<vault>/.washable/cache/files.json`. Returns an
+    """Read `<vault>/.meridian/cache/files.json`. Returns an
     empty dict on missing file, corrupt JSON, or wrong shape
     — a corrupt cache is best treated as cold (force a fresh
     dispatch) rather than aborting.

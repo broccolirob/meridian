@@ -52,7 +52,7 @@ _EXPECTED_RISK_NOTE_NAMES = frozenset({
 })
 
 DEFAULT_REPO = "tests/fixtures/tier0_erc4626"
-DEFAULT_VAULT = ".washable/vaults/tier0"
+DEFAULT_VAULT = ".meridian/vaults/tier0"
 
 
 def parse_args() -> argparse.Namespace:

@@ -14,13 +14,13 @@ is committed, the README shows "Screenshot coming soon."
    ```bash
    uv run python scripts/document_repo.py \
        --repo tests/fixtures/tier1_uniswap_v2 \
-       --vault .washable/vaults/screenshot-capture
+       --vault .meridian/vaults/screenshot-capture
    ```
 
 2. Open the vault in Obsidian:
 
    ```bash
-   open -a Obsidian .washable/vaults/screenshot-capture
+   open -a Obsidian .meridian/vaults/screenshot-capture
    ```
 
 3. Navigate to `contracts/UniswapV2Pair.md`. This contract is the

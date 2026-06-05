@@ -1,5 +1,5 @@
 [project]
-name = "washable"
+name = "meridian"
 version = "0.1.0"
 description = "Code atlas — turns any codebase into an audit-ready Obsidian vault using Trailmark and deepagents."
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-washable = "main:cli"
+meridian = "main:cli"
 
 [build-system]
 requires = ["hatchling"]
@@ -27,14 +27,14 @@ package = true
 [tool.hatch.build.targets.wheel]
 # Top-level modules that ship in the wheel. `src/` is the
 # package tree; `main.py` provides the console_script entry
-# (`washable = "main:cli"`).
+# (`meridian = "main:cli"`).
 packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # `include` only affects sdists; `force-include` is the
 # wheel equivalent that puts main.py at the wheel root so
 # `from main import cli` resolves post-install (verified
-# with `uvx --from . washable --version` smoke).
+# with `uvx --from . meridian --version` smoke).
 "main.py" = "main.py"
 
 [dependency-groups]

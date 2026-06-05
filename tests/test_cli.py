@@ -1,4 +1,4 @@
-"""Tests for the washable CLI subcommands and global flags.
+"""Tests for the meridian CLI subcommands and global flags.
 
 Pattern: import `cli` from `main`, call with an argv list,
 assert exit code + side effects (file written, stdout
@@ -25,19 +25,19 @@ from src.graph.persist import CACHE_ROOT
 
 
 def test_cli_version_prints_project_version(capsys):
-    """`washable --version` exits 0 after printing the
+    """`meridian --version` exits 0 after printing the
     package version. argparse's `action="version"` raises
     SystemExit(0) by design."""
     with pytest.raises(SystemExit) as exc:
         cli(["--version"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "washable " in out
+    assert "meridian " in out
     assert _project_version() in out
 
 
 def test_cli_help_lists_all_subcommands(capsys):
-    """`washable --help` lists every subcommand. Pins the
+    """`meridian --help` lists every subcommand. Pins the
     CHUNKS.md 5.4 success criterion: `parse`, `diff`,
     `validate` all visible in the help output."""
     with pytest.raises(SystemExit) as exc:
@@ -56,7 +56,7 @@ def test_cli_help_lists_all_subcommands(capsys):
 def test_cli_parse_writes_graph_and_prints_gid(
     tier0_dir, tmp_path, capsys,
 ):
-    """`washable parse <repo>` parses the source tree into
+    """`meridian parse <repo>` parses the source tree into
     the default graph cache and prints a 12-hex graph_id
     to stdout.
 

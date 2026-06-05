@@ -1,11 +1,11 @@
-"""washable CLI entry point.
+"""meridian CLI entry point.
 
 Wired by `pyproject.toml`'s `[project.scripts]` as
-`washable = "main:cli"`. Three subcommands today:
+`meridian = "main:cli"`. Three subcommands today:
 
-  - `washable parse <repo>`           — cache a parsed graph
-  - `washable diff <before> <after>`  — write a diff note
-  - `washable validate`               — check vault wikilinks
+  - `meridian parse <repo>`           — cache a parsed graph
+  - `meridian diff <before> <after>`  — write a diff note
+  - `meridian validate`               — check vault wikilinks
 
 Plus top-level flags:
 
@@ -43,9 +43,9 @@ def _project_version() -> str:
     reading `pyproject.toml` at the repo root for dev runs
     where the package isn't installed (rare with chunk 5.2's
     `tool.uv.package = true`, but the fallback is cheap and
-    keeps `uv run washable --version` working pre-install)."""
+    keeps `uv run meridian --version` working pre-install)."""
     try:
-        return _pkg_version("washable")
+        return _pkg_version("meridian")
     except PackageNotFoundError:
         import tomllib
         pyproject = Path(__file__).resolve().parent / "pyproject.toml"
@@ -73,16 +73,16 @@ def _require_vault(
     create-on-demand is intentional."""
     if not args.vault_path:
         raise SystemExit(
-            f"error: `washable {cmd}` requires --vault-path "
+            f"error: `meridian {cmd}` requires --vault-path "
             f"(set at the top level, e.g. "
-            f"`washable --vault-path ./my-vault {cmd} ...`)"
+            f"`meridian --vault-path ./my-vault {cmd} ...`)"
         )
     if must_exist:
         path = Path(args.vault_path)
         if not path.exists():
             raise SystemExit(
                 f"error: vault does not exist: {args.vault_path} "
-                f"(typo? `washable {cmd}` will not create the "
+                f"(typo? `meridian {cmd}` will not create the "
                 f"vault for you)"
             )
         if not path.is_dir():
@@ -120,9 +120,9 @@ def _resolve_to_graph_id(arg: str) -> str:
 
 
 def _cmd_parse(args: argparse.Namespace) -> int:
-    """`washable parse <repo>` — parses a source tree into
+    """`meridian parse <repo>` — parses a source tree into
     the graph cache; prints the 12-hex graph_id to stdout.
-    Pipeable into `washable diff`."""
+    Pipeable into `meridian diff`."""
     repo = Path(args.repo)
     if not repo.exists():
         raise SystemExit(f"error: repo path does not exist: {repo}")
@@ -134,7 +134,7 @@ def _cmd_parse(args: argparse.Namespace) -> int:
 
 
 def _cmd_diff(args: argparse.Namespace) -> int:
-    """`washable diff <before> <after>` — vault comes from
+    """`meridian diff <before> <after>` — vault comes from
     the top-level `--vault-path` flag (chunk 5.4 contract
     change from 5.2's positional vault)."""
     vault = _require_vault(args, "diff")
@@ -150,7 +150,7 @@ def _cmd_diff(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    """`washable validate` — checks every wikilink in the
+    """`meridian validate` — checks every wikilink in the
     vault. Optional `--fix` rewrites source notes to strip
     broken links. Wraps `src.validate` helpers; matches the
     standalone `scripts/validate_vault.py` semantics."""
@@ -176,7 +176,7 @@ def cli(argv: list[str] | None = None) -> int:
     going through SystemExit. `main()` wraps with
     `sys.exit(cli())` for the console-script entry point."""
     parser = argparse.ArgumentParser(
-        prog="washable",
+        prog="meridian",
         description=(
             "Code atlas — turns codebases into audit-ready "
             "Obsidian vaults."
@@ -185,7 +185,7 @@ def cli(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"washable {_project_version()}",
+        version=f"meridian {_project_version()}",
     )
     parser.add_argument(
         "--vault-path",
@@ -207,9 +207,9 @@ def cli(argv: list[str] | None = None) -> int:
         description=(
             "Parses the given source tree via trailmark and "
             "caches the resulting graph at "
-            "`.washable/graph/<graph_id>/`. Prints the "
+            "`.meridian/graph/<graph_id>/`. Prints the "
             "12-hex graph_id to stdout (pipeable into "
-            "`washable diff`)."
+            "`meridian diff`)."
         ),
     )
     parse_p.add_argument(

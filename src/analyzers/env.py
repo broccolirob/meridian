@@ -96,7 +96,7 @@ some paths) will still see the real home.
 
 **Real defense in depth requires OS-level sandboxing**
 (bubblewrap on Linux, sandbox-exec on macOS, Docker container,
-or running washable inside a VM). Auditors running washable
+or running meridian inside a VM). Auditors running meridian
 against high-risk repos SHOULD do so in a container with the
 target repo mounted read-only, a dedicated writable artifact
 dir, and no network access. That's a deployment-time
@@ -319,7 +319,7 @@ def _sanitize_path(
         if e_r == real_home_r or e_r.startswith(real_home_r + _os.sep):
             return False
         # Drop entries under the parent process's cwd
-        # (usually the repo root containing washable).
+        # (usually the repo root containing meridian).
         if e_r == parent_cwd_r or e_r.startswith(parent_cwd_r + _os.sep):
             return False
         # Drop entries under the analyzer subprocess's cwd
@@ -363,7 +363,7 @@ def _get_analyzer_temp_home() -> Path:
     ):
         return _analyzer_temp_home
 
-    temp = Path(tempfile.mkdtemp(prefix="washable-analyzer-home-"))
+    temp = Path(tempfile.mkdtemp(prefix="meridian-analyzer-home-"))
     _analyzer_temp_home = temp
     return temp
 

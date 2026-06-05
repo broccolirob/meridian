@@ -61,7 +61,7 @@ def test_compute_file_hashes_skips_missing_files(tmp_path):
 
 
 def test_load_file_hash_cache_returns_empty_when_missing(tmp_path):
-    """Fresh vault, no .washable/cache/ → empty dict, no
+    """Fresh vault, no .meridian/cache/ → empty dict, no
     exception."""
     vault = tmp_path / "vault"
     vault.mkdir()

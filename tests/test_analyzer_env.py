@@ -90,9 +90,9 @@ def test_build_analyzer_env_replaces_home_with_isolated_temp_dir(
     assert temp_home.is_dir(), (
         f"replacement HOME must exist as a dir: {temp_home}"
     )
-    # Temp HOME prefix marks it as washable-managed
+    # Temp HOME prefix marks it as meridian-managed
     # (not the real one or some random other path).
-    assert "washable-analyzer-home" in temp_home.name
+    assert "meridian-analyzer-home" in temp_home.name
 
 
 def test_isolated_home_contains_no_symlinks_into_real_home(monkeypatch):

@@ -1,6 +1,6 @@
 """Single-node harness — invoke NodeDocumenter against one graph node.
 
-This is the first real LLM call in washable. Use to dry-run the agent
+This is the first real LLM call in meridian. Use to dry-run the agent
 on small nodes (ERC4626 contract is the default test target) and
 iterate on the subagent prompt + render template.
 
@@ -38,12 +38,12 @@ from src.tools import (  # noqa: E402
 )
 
 DEFAULT_REPO = "tests/fixtures/tier0_erc4626"
-DEFAULT_VAULT = ".washable/vaults/tier0"
+DEFAULT_VAULT = ".meridian/vaults/tier0"
 DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_NODE = "src.tokens.ERC4626:ERC4626"
 
 _MAIN_AGENT_PROMPT = """\
-You are the washable orchestrator. Your ONLY job: dispatch the task
+You are the meridian orchestrator. Your ONLY job: dispatch the task
 to the `node-documenter` subagent via the `task` tool.
 
 Rules:

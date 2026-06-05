@@ -2,7 +2,7 @@
 [[...]] references and reports any that don't resolve.
 
 Wikilink-parsing logic lives in `src/validate.py` (chunk 5.4)
-so the `washable validate` subcommand can share the same
+so the `meridian validate` subcommand can share the same
 implementation. This script remains the standalone entry
 point for dev use:
 

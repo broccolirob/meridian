@@ -93,7 +93,7 @@ def _sweep_stale_tmp_files(vault: Path) -> int:
 
 
 def ensure_vault(vault_path: str | Path) -> Path:
-    """Create the canonical washable vault skeleton at `vault_path`.
+    """Create the canonical meridian vault skeleton at `vault_path`.
     Idempotent. Returns the resolved vault Path.
 
     Also sweeps stale atomic-write tmp files (older than 1
@@ -235,7 +235,7 @@ KIND_TO_FOLDER: dict[str, str] = {
 # engine and it's GC'd, the entry auto-removes. No manual
 # invalidation needed.
 #
-# Module-level rather than attached as `engine._washable_collision_map`
+# Module-level rather than attached as `engine._meridian_collision_map`
 # because instance attributes survive pickle round-trips —
 # save_graph pickles the engine AS-IS, and the next load_graph
 # would reconstitute an engine carrying a STALE map. Today's

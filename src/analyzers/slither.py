@@ -85,7 +85,7 @@ def run_slither(
     Slither's incidental artifacts (`crytic-export/`,
     `crytic-compile.config.json`) land inside `cwd` — i.e.,
     inside the auditor's input repo by default. This matches
-    stock slither behavior and is gitignored at washable's
+    stock slither behavior and is gitignored at meridian's
     root, but for auditors running against external repos
     (git clones, submodules, read-only mounts) it leaves
     untracked files in the audit target. For hermetic runs,
@@ -104,7 +104,7 @@ def run_slither(
     compile`, `forge build`, etc.) inside `cwd`. A malicious
     framework config file in `repo_path` (e.g., a hostile
     `hardhat.config.js`) can therefore execute arbitrary code
-    on the auditor's machine. Washable's intended use is
+    on the auditor's machine. Meridian's intended use is
     accountable inputs — customer codebases under engagement
     and vetted bounty targets — where the code author is
     trusted not to ship a weaponized build config. If you
@@ -204,7 +204,7 @@ def run_slither(
     # a finally so a timed-out subprocess doesn't leak the
     # trusted file.
     trusted_config_fd, trusted_config_path = tempfile.mkstemp(
-        suffix=".json", prefix="washable-slither-config-",
+        suffix=".json", prefix="meridian-slither-config-",
     )
     try:
         with open(trusted_config_fd, "w") as f:

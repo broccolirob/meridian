@@ -517,7 +517,7 @@ def test_phase4_rc2_when_risk_synth_claims_missing_files(
         lambda *a, **k: {
             "graph_id": "abc", "ok": True,
             "reply": '["/tmp/definitely-does-not-exist-' \
-                     'washable-test.md"]',
+                     'meridian-test.md"]',
             "error": None,
         },
     )

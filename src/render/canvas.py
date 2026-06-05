@@ -18,7 +18,7 @@ Out of scope for this chunk:
   - `uses` / `implements` / call edges (inheritance only)
   - Styling / colors / group rectangles
   - Header text node ("Contract overview")
-  - CLI subcommand (`washable canvas`)
+  - CLI subcommand (`meridian canvas`)
 """
 
 import json

@@ -1,1 +1,1 @@
-# washable analyzers — external static-analysis tool wrappers.
+# meridian analyzers — external static-analysis tool wrappers.
